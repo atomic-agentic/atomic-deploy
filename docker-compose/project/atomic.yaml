@@ -1,0 +1,4 @@
+# A placeholder project so the container has somewhere to run. Point
+# ATOMIC_PROJECT_DIR in .env at a real project instead.
+atomic: 1
+name: compose-example

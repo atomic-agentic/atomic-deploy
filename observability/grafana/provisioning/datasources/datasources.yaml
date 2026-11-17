@@ -1,0 +1,99 @@
+# Grafana datasources for atomic. The UIDs are fixed because the dashboards
+# refer to them. URLs and the read-only database login come from the
+# environment, so every deployment sets them for its own network:
+#
+#   PROMETHEUS_URL   e.g. http://prometheus:9090
+#   TEMPO_URL        e.g. http://tempo:3200
+#   LOKI_URL         e.g. http://loki:3100
+#   PROMETHEUS_SAMPLE_INTERVAL   how often samples arrive, e.g. 15s
+#   ATOMIC_PG_HOST   host:port of the database atomic writes to
+#   ATOMIC_PG_DATABASE, ATOMIC_PG_USER, ATOMIC_PG_PASSWORD, ATOMIC_PG_SSLMODE
+#
+# The database login must be read-only. It is used by the Durable runs
+# dashboard only.
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: ${PROMETHEUS_URL}
+    isDefault: true
+    jsonData:
+      httpMethod: POST
+      prometheusType: Prometheus
+      # How often samples arrive: atomic's OTLP metric export interval
+      # (OTEL_METRIC_EXPORT_INTERVAL) and the scrape interval. Grafana
+      # derives $__rate_interval from it, so a slower export needs a larger
+      # value or rate panels come out empty.
+      timeInterval: ${PROMETHEUS_SAMPLE_INTERVAL}
+      # A point on a duration chart links to the step attempt that produced it.
+      exemplarTraceIdDestinations:
+        - name: trace_id
+          datasourceUid: tempo
+          urlDisplayLabel: Open trace
+
+  - name: Tempo
+    uid: tempo
+    type: tempo
+    access: proxy
+    url: ${TEMPO_URL}
+    jsonData:
+      tracesToLogsV2:
+        datasourceUid: loki
+        spanStartTimeShift: -5m
+        spanEndTimeShift: 5m
+        # Loki keeps OTLP trace IDs as structured metadata, not in the log
+        # line, so the link filters on the field instead of searching text.
+        customQuery: true
+        query: '{service_name="atomic"} | trace_id="$${__trace.traceId}"'
+      tracesToMetrics:
+        datasourceUid: prometheus
+        spanStartTimeShift: -10m
+        spanEndTimeShift: 10m
+        tags:
+          - key: service.name
+            value: service_name
+        queries:
+          - name: Span duration p95
+            query: histogram_quantile(0.95, sum by (le) (rate(traces_span_metrics_duration_seconds_bucket{$$__tags}[5m])))
+      nodeGraph:
+        enabled: true
+      search:
+        hide: false
+      traceQuery:
+        timeShiftEnabled: true
+        spanStartTimeShift: -1h
+        spanEndTimeShift: 1h
+
+  - name: Loki
+    uid: loki
+    type: loki
+    access: proxy
+    url: ${LOKI_URL}
+    jsonData:
+      maxLines: 1000
+      derivedFields:
+        - name: trace_id
+          matcherType: label
+          matcherRegex: trace_id
+          datasourceUid: tempo
+          url: $${__value.raw}
+          urlDisplayLabel: Open trace
+
+  - name: atomic database
+    uid: atomic-postgres
+    type: grafana-postgresql-datasource
+    url: ${ATOMIC_PG_HOST}
+    user: ${ATOMIC_PG_USER}
+    jsonData:
+      database: ${ATOMIC_PG_DATABASE}
+      sslmode: ${ATOMIC_PG_SSLMODE}
+      postgresVersion: 1800
+      timescaledb: false
+      maxOpenConns: 5
+      maxIdleConns: 2
+    secureJsonData:
+      password: ${ATOMIC_PG_PASSWORD}

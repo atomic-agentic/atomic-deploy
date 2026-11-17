@@ -1,0 +1,16 @@
+# Load atomic's dashboards into a folder named atomic. Mount
+# observability/grafana/dashboards at the path below.
+
+apiVersion: 1
+
+providers:
+  - name: atomic
+    folder: atomic
+    folderUid: atomic
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards/atomic
+      foldersFromFilesStructure: false

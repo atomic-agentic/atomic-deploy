@@ -1,0 +1,7 @@
+# Local settings and secrets.
+.env
+*.env
+!.env.example
+
+# Release archives staged for an image build.
+docker-compose/atomic/dist/
