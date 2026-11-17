@@ -20,6 +20,7 @@ deployment depends on something atomic does not do yet, its README says so.
 | Directory | What it is |
 | --- | --- |
 | [`observability/`](observability) | OpenTelemetry Collector, Prometheus, Tempo, Loki and Grafana configuration, atomic's dashboards, and the telemetry they expect. Every deployment uses it |
+| [`docker/`](docker) | Project images: atomic's runtime image plus the toolchains a project's atom commands need, such as uv and Python. Every deployment builds one |
 
 ## Conventions
 
