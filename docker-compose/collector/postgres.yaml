@@ -1,0 +1,25 @@
+# Merged over observability/otel-collector/collector.yaml in this deployment:
+# collect Postgres metrics from the database atomic writes to, as the
+# monitor-only login. A deployment on a managed database usually takes these
+# from the provider instead.
+
+receivers:
+  postgresql:
+    endpoint: postgres:5432
+    transport: tcp
+    username: atomic_monitor
+    password: ${env:ATOMIC_MONITOR_PASSWORD}
+    databases: [atomic]
+    collection_interval: 30s
+    tls:
+      insecure: true
+    metrics:
+      postgresql.deadlocks:
+        enabled: true
+
+service:
+  pipelines:
+    metrics/postgres:
+      receivers: [postgresql]
+      processors: [memory_limiter, batch]
+      exporters: [otlphttp/prometheus]

@@ -1,0 +1,231 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# atomic on one host: the runtime on Postgres, with an OpenTelemetry Collector
+# and a Grafana stack (Prometheus, Tempo, Loki) and atomic's dashboards.
+#
+#   ./atomic/stage.sh            # once per atomic release
+#   cp .env.example .env         # then edit it
+#   docker compose up -d --build
+#
+# Every port is bound to 127.0.0.1. Read README.md before exposing any of
+# them.
+
+name: atomic
+
+services:
+  # atomic's runtime image, built from the staged release. It is only built,
+  # never run: the profile keeps it out of `up`, and the entrypoint would exit
+  # at once if it were started. The atomic service runs the project image
+  # built on top of it.
+  atomic-runtime:
+    build:
+      context: ./atomic
+    image: atomic-runtime:${ATOMIC_IMAGE_TAG:-latest}
+    # Rebuild on every build of the project image, so a newly staged release
+    # is never skipped. Unchanged layers come from the build cache.
+    pull_policy: build
+    profiles: [build-only]
+    entrypoint: ["/bin/true"]
+    restart: "no"
+
+  atomic:
+    # The project image: the runtime image plus the toolchains and packages
+    # the project's atom commands need. Its Dockerfile starts FROM
+    # atomic-runtime, which is mapped to the image built above, and can copy
+    # files such as a lockfile from the project. See ../docker/README.md.
+    build:
+      context: ${ATOMIC_PROJECT_IMAGE_DIR:-../docker/python}
+      additional_contexts:
+        atomic-runtime: service:atomic-runtime
+        project: ${ATOMIC_PROJECT_DIR:-./project}
+    image: atomic-local:${ATOMIC_IMAGE_TAG:-latest}
+    # Rebuild on every `up`, so a newly staged release or a changed project
+    # image is never skipped. Unchanged layers come from the build cache.
+    pull_policy: build
+    command: ${ATOMIC_COMMAND:-serve}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+    # The project is mounted under its own name, because atomic keys its
+    # state by the project's path: two projects mounted at the same path
+    # would share one state directory.
+    working_dir: /workspace/${ATOMIC_PROJECT_NAME:-project}
+    environment:
+      # atomic's own database. Never DATABASE_URL, which belongs to the
+      # application atomic works on. The password is placed in the URL as
+      # is, so it must not contain URL syntax (use openssl rand -hex).
+      ATOMIC_DATABASE_URL: postgres://atomic:${ATOMIC_DB_PASSWORD:?set ATOMIC_DB_PASSWORD in .env}@postgres:5432/atomic
+      # Passed only when set, so an unset value does not override the
+      # project's atomic.yaml with an empty one.
+      ATOMIC_MODEL_BASE_URL:
+      ATOMIC_MODEL:
+      # The durable runtime's executor identity. It must be unique to this
+      # process and the same after a restart, so the restarted process
+      # recovers its own unfinished runs and no one else's.
+      DBOS__VMID: ${ATOMIC_EXECUTOR_ID:-compose-atomic-0}
+      OTEL_SERVICE_NAME: atomic
+      OTEL_RESOURCE_ATTRIBUTES: service.namespace=atomic,service.instance.id=${ATOMIC_EXECUTOR_ID:-compose-atomic-0},deployment.environment.name=${ATOMIC_ENVIRONMENT:-compose}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+      # Matches PROMETHEUS_SAMPLE_INTERVAL in Grafana. The SDK default of 60s
+      # leaves the dashboards' rate panels empty.
+      OTEL_METRIC_EXPORT_INTERVAL: "15000"
+    volumes:
+      # State: today, atomic's durable database (atomic.db), Codex's home and
+      # its state database, attempt worktrees and the local artifact store.
+      - atomic-state:/var/lib/atomic
+      # The project atomic runs: atoms, workflows and atomic.yaml.
+      - ${ATOMIC_PROJECT_DIR:-./project}:/workspace/${ATOMIC_PROJECT_NAME:-project}:z
+    extra_hosts:
+      # Reach a model server on the Docker host as host.docker.internal.
+      - host.docker.internal:host-gateway
+    # Codex runs each atom's commands in a bubblewrap sandbox, which needs
+    # user namespaces and mounts. Docker's default seccomp profile refuses
+    # the first and its default AppArmor profile the second, so the sandbox
+    # cannot start. These lift both for this one container. See README.md,
+    # "Open questions".
+    security_opt:
+      - seccomp=unconfined
+      - apparmor=unconfined
+    stop_grace_period: 60s
+
+  postgres:
+    image: postgres:18.7-trixie@sha256:2ea8630df176ad090ec92136dee850397c5af8781e4bcf2e4162593691c61bbc
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: postgres
+      ATOMIC_DB_PASSWORD: ${ATOMIC_DB_PASSWORD:?set ATOMIC_DB_PASSWORD in .env}
+      ATOMIC_READER_PASSWORD: ${ATOMIC_READER_PASSWORD:?set ATOMIC_READER_PASSWORD in .env}
+      ATOMIC_MONITOR_PASSWORD: ${ATOMIC_MONITOR_PASSWORD:?set ATOMIC_MONITOR_PASSWORD in .env}
+    volumes:
+      - postgres-data:/var/lib/postgresql
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro,z
+    ports:
+      - 127.0.0.1:${POSTGRES_PORT:-5432}:5432
+    healthcheck:
+      # Over TCP and into the atomic database: during first-start setup the
+      # server listens on its socket only and the database may not exist
+      # yet, so this passes only once setup has finished.
+      test: ["CMD-SHELL", "PGPASSWORD=\"$${POSTGRES_PASSWORD}\" psql -h 127.0.0.1 -U postgres -d atomic -tAc 'select 1' >/dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.164.0@sha256:340c9ca6a36617084c6661bdc4f0fe92b7cda5a805d61673ec8db375fddc522b
+    restart: unless-stopped
+    command:
+      - --config=/etc/otelcol/collector.yaml
+      - --config=/etc/otelcol/postgres.yaml
+    environment:
+      PROMETHEUS_OTLP_ENDPOINT: http://prometheus:9090/api/v1/otlp
+      TEMPO_OTLP_ENDPOINT: tempo:4317
+      LOKI_OTLP_ENDPOINT: http://loki:3100/otlp
+      TRACE_SAMPLE_PERCENT: ${TRACE_SAMPLE_PERCENT:-100}
+      TRACE_DECISION_WAIT: ${TRACE_DECISION_WAIT:-60s}
+      ATOMIC_MONITOR_PASSWORD: ${ATOMIC_MONITOR_PASSWORD:?set ATOMIC_MONITOR_PASSWORD in .env}
+    # The memory limiter works in shares of this limit; without one it would
+    # take most of the host's memory as its budget.
+    mem_limit: ${OTEL_COLLECTOR_MEMORY:-1g}
+    volumes:
+      - ../observability/otel-collector/collector.yaml:/etc/otelcol/collector.yaml:ro,z
+      - ./collector/postgres.yaml:/etc/otelcol/postgres.yaml:ro,z
+    ports:
+      # OTLP from tools on the host, for example a locally built atomic.
+      - 127.0.0.1:${OTLP_GRPC_PORT:-4317}:4317
+      - 127.0.0.1:${OTLP_HTTP_PORT:-4318}:4318
+    depends_on:
+      postgres:
+        condition: service_healthy
+      prometheus:
+        condition: service_started
+      tempo:
+        condition: service_started
+      loki:
+        condition: service_started
+
+  prometheus:
+    image: prom/prometheus:v3.5.5@sha256:332c2f43e7e389d74d3893b55bb02fbbd684208e681eeb604641d5d769c0fe2a
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yaml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-15d}
+      - --web.enable-otlp-receiver
+      - --enable-feature=exemplar-storage
+    volumes:
+      - ../observability/prometheus/prometheus.yaml:/etc/prometheus/prometheus.yaml:ro,z
+      - prometheus-data:/prometheus
+    ports:
+      - 127.0.0.1:${PROMETHEUS_PORT:-9090}:9090
+
+  tempo:
+    image: grafana/tempo:3.1.1@sha256:64e2fbd56d9c2b3412a4b430a58ea59e91a670b1e75f920a0c702213ad145044
+    restart: unless-stopped
+    command:
+      - -config.file=/etc/tempo/tempo.yaml
+      - -config.expand-env=true
+    environment:
+      TEMPO_RETENTION: ${TEMPO_RETENTION:-168h}
+    volumes:
+      - ../observability/tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro,z
+      - tempo-data:/var/tempo
+
+  loki:
+    image: grafana/loki:3.7.9@sha256:0db216b630ae1f348a1584c67f3cead8b4c1fc839169a39501db664744158e28
+    restart: unless-stopped
+    command:
+      - -config.file=/etc/loki/loki.yaml
+      - -config.expand-env=true
+    environment:
+      LOKI_RETENTION: ${LOKI_RETENTION:-168h}
+      LOKI_DISK_FULL_THRESHOLD: ${LOKI_DISK_FULL_THRESHOLD:-0.9}
+    volumes:
+      - ../observability/loki/loki.yaml:/etc/loki/loki.yaml:ro,z
+      - loki-data:/loki
+
+  grafana:
+    image: grafana/grafana:12.4.15@sha256:2894082f6cf7081aefdc1389265c04000812309208c190d75e8c65f7a30e4b7e
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+      - tempo
+      - loki
+      - postgres
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in .env}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/atomic/atomic-overview.json
+      PROMETHEUS_URL: http://prometheus:9090
+      PROMETHEUS_SAMPLE_INTERVAL: 15s
+      TEMPO_URL: http://tempo:3200
+      LOKI_URL: http://loki:3100
+      ATOMIC_PG_HOST: postgres:5432
+      ATOMIC_PG_DATABASE: atomic
+      ATOMIC_PG_USER: atomic_reader
+      ATOMIC_PG_PASSWORD: ${ATOMIC_READER_PASSWORD:?set ATOMIC_READER_PASSWORD in .env}
+      ATOMIC_PG_SSLMODE: disable
+    volumes:
+      - ../observability/grafana/provisioning:/etc/grafana/provisioning:ro,z
+      - ../observability/grafana/dashboards:/var/lib/grafana/dashboards/atomic:ro,z
+      - grafana-data:/var/lib/grafana
+    ports:
+      - 127.0.0.1:${GRAFANA_PORT:-3000}:3000
+
+volumes:
+  atomic-state:
+  postgres-data:
+  prometheus-data:
+  tempo-data:
+  loki-data:
+  grafana-data:

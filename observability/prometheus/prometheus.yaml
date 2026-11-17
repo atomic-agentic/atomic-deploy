@@ -1,0 +1,50 @@
+# Prometheus. atomic's metrics arrive from the collector through Prometheus's
+# native OTLP receiver (start Prometheus with --web.enable-otlp-receiver), so
+# atomic is never scraped. Scrape jobs here cover the observability stack
+# itself; the targets use the Docker Compose service names.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+otlp:
+  # Resource attributes copied onto every series, so dashboards can filter by
+  # environment and version without joining target_info. Run, workflow-run and
+  # step IDs are never resource attributes and never labels.
+  promote_resource_attributes:
+    - service.name
+    - service.namespace
+    - service.version
+    - service.instance.id
+    - deployment.environment.name
+    # From the collector's Postgres receiver, which reports the database and
+    # table as resource attributes.
+    - postgresql.database.name
+    - postgresql.schema.name
+    - postgresql.table.name
+  # OTLP metric names become Prometheus names with dots turned into
+  # underscores and unit and _total suffixes added: atomic.step.duration (s)
+  # becomes atomic_step_duration_seconds. observability/metrics.md lists them.
+  translation_strategy: UnderscoreEscapingWithSuffixes
+
+storage:
+  tsdb:
+    # OTLP pushes can arrive slightly out of order after a collector retry.
+    out_of_order_time_window: 30m
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+  - job_name: otel-collector
+    static_configs:
+      - targets: ["otel-collector:8888"]
+  - job_name: tempo
+    static_configs:
+      - targets: ["tempo:3200"]
+  - job_name: loki
+    static_configs:
+      - targets: ["loki:3100"]
+  - job_name: grafana
+    static_configs:
+      - targets: ["grafana:3000"]

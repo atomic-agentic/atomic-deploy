@@ -1,0 +1,994 @@
+{
+  "uid": "atomic-durable-runs",
+  "title": "atomic \u00b7 Durable runs",
+  "description": "Runs and steps read from durare's tables in Postgres: the record atomic recovers from.",
+  "tags": [
+    "atomic"
+  ],
+  "editable": true,
+  "graphTooltip": 1,
+  "refresh": "30s",
+  "schemaVersion": 41,
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "fiscalYearStartMonth": 0,
+  "liveNow": false,
+  "weekStart": "",
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "links": [
+    {
+      "title": "atomic dashboards",
+      "type": "dashboards",
+      "tags": [
+        "atomic"
+      ],
+      "asDropdown": true,
+      "includeVars": true,
+      "keepTime": true,
+      "icon": "external link",
+      "targetBlank": false,
+      "tooltip": "",
+      "url": ""
+    }
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "durable_schema",
+        "label": "durare schema",
+        "type": "textbox",
+        "query": "dbos",
+        "current": {
+          "text": "dbos",
+          "value": "dbos"
+        },
+        "description": "The Postgres schema holding durare's workflow tables."
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "text",
+      "title": "",
+      "options": {
+        "mode": "markdown",
+        "content": "Read straight from durare's tables in Postgres, the record atomic recovers from. This works without any telemetry export. Statuses: PENDING (running, waiting or interrupted), ENQUEUED, DELAYED (scheduled for later), SUCCESS, ERROR, CANCELLED and MAX_RECOVERY_ATTEMPTS_EXCEEDED. Until atomic has created these tables in this database, the panels report that the relation does not exist."
+      },
+      "id": 1,
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 2
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Pending",
+      "description": "Runs not finished: running now, waiting at a gate, or interrupted and awaiting recovery.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "atomic-postgres"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "atomic-postgres"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "SELECT count(*) AS pending FROM \"${durable_schema:raw}\".workflow_status WHERE status = 'PENDING'"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center"
+      },
+      "id": 2,
+      "gridPos": {
+        "x": 0,
+        "y": 2,
+        "w": 3,
+        "h": 4
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Queued",
+      "description": "Waiting in a queue, or delayed until a set time.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "atomic-postgres"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "atomic-postgres"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "SELECT count(*) AS queued FROM \"${durable_schema:raw}\".workflow_status WHERE status IN ('ENQUEUED', 'DELAYED')"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center"
+      },
+      "id": 3,
+      "gridPos": {
+        "x": 3,
+        "y": 2,
+        "w": 3,
+        "h": 4
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Succeeded",
+      "description": "",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "atomic-postgres"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "atomic-postgres"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "SELECT count(*) AS succeeded FROM \"${durable_schema:raw}\".workflow_status WHERE status = 'SUCCESS' AND created_at BETWEEN $__unixEpochFrom()::bigint * 1000 AND $__unixEpochTo()::bigint * 1000"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center"
+      },
+      "id": 4,
+      "gridPos": {
+        "x": 6,
+        "y": 2,
+        "w": 3,
+        "h": 4
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Errored",
+      "description": "",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "atomic-postgres"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "atomic-postgres"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "SELECT count(*) AS errored FROM \"${durable_schema:raw}\".workflow_status WHERE status = 'ERROR' AND created_at BETWEEN $__unixEpochFrom()::bigint * 1000 AND $__unixEpochTo()::bigint * 1000"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center"
+      },
+      "id": 5,
+      "gridPos": {
+        "x": 9,
+        "y": 2,
+        "w": 3,
+        "h": 4
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Recovered",
+      "description": "Runs in the range that were recovered at least once after their process stopped.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "atomic-postgres"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "atomic-postgres"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "SELECT count(*) AS recovered FROM \"${durable_schema:raw}\".workflow_status WHERE recovery_attempts > 0 AND created_at BETWEEN $__unixEpochFrom()::bigint * 1000 AND $__unixEpochTo()::bigint * 1000"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          },
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center"
+      },
+      "id": 6,
+      "gridPos": {
+        "x": 12,
+        "y": 2,
+        "w": 3,
+        "h": 4
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Cancelled",
+      "description": "",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "atomic-postgres"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "atomic-postgres"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "SELECT count(*) AS cancelled FROM \"${durable_schema:raw}\".workflow_status WHERE status = 'CANCELLED' AND created_at BETWEEN $__unixEpochFrom()::bigint * 1000 AND $__unixEpochTo()::bigint * 1000"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center"
+      },
+      "id": 7,
+      "gridPos": {
+        "x": 15,
+        "y": 2,
+        "w": 3,
+        "h": 4
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Recovery limit hit",
+      "description": "Runs durare stopped recovering. Each needs a person.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "atomic-postgres"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "atomic-postgres"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "SELECT count(*) AS exceeded FROM \"${durable_schema:raw}\".workflow_status WHERE status = 'MAX_RECOVERY_ATTEMPTS_EXCEEDED'"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center"
+      },
+      "id": 8,
+      "gridPos": {
+        "x": 18,
+        "y": 2,
+        "w": 3,
+        "h": 4
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Executors",
+      "description": "Distinct executor IDs owning unfinished runs. Every runtime process needs its own stable ID.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "atomic-postgres"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "atomic-postgres"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "SELECT count(DISTINCT executor_id) AS executors FROM \"${durable_schema:raw}\".workflow_status WHERE status = 'PENDING'"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center"
+      },
+      "id": 9,
+      "gridPos": {
+        "x": 21,
+        "y": 2,
+        "w": 3,
+        "h": 4
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Runs created by status",
+      "description": "",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "atomic-postgres"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "atomic-postgres"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "time_series",
+          "rawSql": "SELECT $__unixEpochGroupAlias(created_at / 1000, $__interval, 0), status AS metric, count(*) AS value FROM \"${durable_schema:raw}\".workflow_status WHERE created_at BETWEEN $__unixEpochFrom()::bigint * 1000 AND $__unixEpochTo()::bigint * 1000 GROUP BY 1, 2 ORDER BY 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "lineWidth": 1,
+            "fillOpacity": 18,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 10,
+      "gridPos": {
+        "x": 0,
+        "y": 6,
+        "w": 12,
+        "h": 8
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Run duration p95 by workflow",
+      "description": "From creation to a terminal state, gate waits included.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "atomic-postgres"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "atomic-postgres"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "time_series",
+          "rawSql": "SELECT $__unixEpochGroupAlias(completed_at / 1000, $__interval, 0), name AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY (completed_at - created_at) / 1000.0) AS value FROM \"${durable_schema:raw}\".workflow_status WHERE completed_at BETWEEN $__unixEpochFrom()::bigint * 1000 AND $__unixEpochTo()::bigint * 1000 GROUP BY 1, 2 ORDER BY 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 11,
+      "gridPos": {
+        "x": 12,
+        "y": 6,
+        "w": 12,
+        "h": 8
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Steps completed by name",
+      "description": "Checkpointed step results. A step served from its checkpoint on recovery is not written again.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "atomic-postgres"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "atomic-postgres"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "time_series",
+          "rawSql": "SELECT $__unixEpochGroupAlias(completed_at_epoch_ms / 1000, $__interval, 0), function_name AS metric, count(*) AS value FROM \"${durable_schema:raw}\".operation_outputs WHERE completed_at_epoch_ms BETWEEN $__unixEpochFrom()::bigint * 1000 AND $__unixEpochTo()::bigint * 1000 GROUP BY 1, 2 ORDER BY 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "lineWidth": 1,
+            "fillOpacity": 18,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 12,
+      "gridPos": {
+        "x": 0,
+        "y": 14,
+        "w": 12,
+        "h": 8
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Step duration p95 by name",
+      "description": "",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "atomic-postgres"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "atomic-postgres"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "time_series",
+          "rawSql": "SELECT $__unixEpochGroupAlias(completed_at_epoch_ms / 1000, $__interval, 0), function_name AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY (completed_at_epoch_ms - started_at_epoch_ms) / 1000.0) AS value FROM \"${durable_schema:raw}\".operation_outputs WHERE completed_at_epoch_ms BETWEEN $__unixEpochFrom()::bigint * 1000 AND $__unixEpochTo()::bigint * 1000 AND started_at_epoch_ms IS NOT NULL GROUP BY 1, 2 ORDER BY 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 13,
+      "gridPos": {
+        "x": 12,
+        "y": 14,
+        "w": 12,
+        "h": 8
+      }
+    },
+    {
+      "type": "table",
+      "title": "Unfinished runs, oldest first",
+      "description": "Run IDs belong in tables like this one, never in metric labels.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "atomic-postgres"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "atomic-postgres"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "SELECT workflow_uuid AS run, name AS workflow, status, executor_id AS executor, queue_name AS queue, recovery_attempts AS recoveries, to_timestamp(created_at / 1000.0) AS created, now() - to_timestamp(updated_at / 1000.0) AS idle_for FROM \"${durable_schema:raw}\".workflow_status WHERE status IN ('PENDING', 'ENQUEUED', 'DELAYED') ORDER BY created_at LIMIT 100"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        }
+      },
+      "id": 14,
+      "gridPos": {
+        "x": 0,
+        "y": 22,
+        "w": 24,
+        "h": 9
+      }
+    },
+    {
+      "type": "table",
+      "title": "Unfinished runs by executor",
+      "description": "Runs owned by an executor that no longer exists wait here until something recovers them.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "atomic-postgres"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "atomic-postgres"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "SELECT executor_id AS executor, status, count(*) AS runs, max(recovery_attempts) AS max_recoveries FROM \"${durable_schema:raw}\".workflow_status WHERE status IN ('PENDING', 'ENQUEUED', 'DELAYED') GROUP BY 1, 2 ORDER BY 3 DESC"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        }
+      },
+      "id": 15,
+      "gridPos": {
+        "x": 0,
+        "y": 31,
+        "w": 12,
+        "h": 8
+      }
+    },
+    {
+      "type": "table",
+      "title": "Recent failures",
+      "description": "Error text is left out on purpose: it can quote inputs. Read it with atomic's own run inspection.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "atomic-postgres"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "atomic-postgres"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "SELECT workflow_uuid AS run, name AS workflow, status, executor_id AS executor, recovery_attempts AS recoveries, to_timestamp(updated_at / 1000.0) AS at FROM \"${durable_schema:raw}\".workflow_status WHERE status IN ('ERROR', 'MAX_RECOVERY_ATTEMPTS_EXCEEDED', 'CANCELLED') AND created_at BETWEEN $__unixEpochFrom()::bigint * 1000 AND $__unixEpochTo()::bigint * 1000 ORDER BY updated_at DESC LIMIT 50"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        }
+      },
+      "id": 16,
+      "gridPos": {
+        "x": 12,
+        "y": 31,
+        "w": 12,
+        "h": 8
+      }
+    },
+    {
+      "type": "table",
+      "title": "Queues",
+      "description": "",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "atomic-postgres"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "atomic-postgres"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "SELECT coalesce(queue_name, '(none)') AS queue, status, count(*) AS runs FROM \"${durable_schema:raw}\".workflow_status WHERE status IN ('PENDING', 'ENQUEUED', 'DELAYED') GROUP BY 1, 2 ORDER BY 1, 2"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        }
+      },
+      "id": 17,
+      "gridPos": {
+        "x": 0,
+        "y": 39,
+        "w": 24,
+        "h": 6
+      }
+    }
+  ],
+  "version": 1
+}

@@ -1,0 +1,21 @@
+[project]
+name = "compose-example"
+version = "0.1.0"
+description = "A small Python project for atomic's Docker Compose deployment to run atoms on."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.14"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "pytest>=9",
+    "ruff>=0.14",
+]
+
+[build-system]
+requires = ["uv_build>=0.13.6,<0.14"]
+build-backend = "uv_build"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
