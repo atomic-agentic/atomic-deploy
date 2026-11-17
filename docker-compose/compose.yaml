@@ -29,14 +29,15 @@ services:
     restart: "no"
 
   atomic:
-    # The project image: the runtime image plus the toolchains the project's
-    # atom commands need. Its Dockerfile starts FROM atomic-runtime, which
-    # this context maps to the image built above. See README.md, "The project
-    # image".
+    # The project image: the runtime image plus the toolchains and packages
+    # the project's atom commands need. Its Dockerfile starts FROM
+    # atomic-runtime, which is mapped to the image built above, and can copy
+    # files such as a lockfile from the project. See ../docker/README.md.
     build:
-      context: ${ATOMIC_PROJECT_IMAGE_DIR:-./project-images/base}
+      context: ${ATOMIC_PROJECT_IMAGE_DIR:-../docker/python}
       additional_contexts:
         atomic-runtime: service:atomic-runtime
+        project: ${ATOMIC_PROJECT_DIR:-./project}
     image: atomic-local:${ATOMIC_IMAGE_TAG:-latest}
     # Rebuild on every `up`, so a newly staged release or a changed project
     # image is never skipped. Unchanged layers come from the build cache.

@@ -1,4 +1,5 @@
-# A placeholder project so the container has somewhere to run. Point
+# The example project the deployment runs when ATOMIC_PROJECT_DIR is not set:
+# a small Python library managed with uv (see README.md). Point
 # ATOMIC_PROJECT_DIR in .env at a real project instead.
 atomic: 1
 name: compose-example

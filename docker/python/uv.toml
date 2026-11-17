@@ -1,0 +1,19 @@
+# uv's settings for everyone in the image, read from /etc/uv/uv.toml. A file
+# rather than UV_* variables, so uv behaves the same in Codex's sandbox
+# whatever environment the sandbox passes to a command.
+
+# The packages in the project's uv.lock were put here when the image was
+# built. uv will not use a cache it cannot write, and /tmp is one of the few
+# places Codex's workspace-write sandbox lets a command write. (Python is in
+# /opt/uv/python, which uv takes only from UV_PYTHON_INSTALL_DIR; the image
+# also links it into /usr/local/bin, so uv finds it on PATH without that.)
+cache-dir = "/tmp/uv-cache"
+
+# Atom commands have no network: use what the image holds, and fail at once
+# rather than wait on a download that cannot happen.
+offline = true
+python-downloads = "never"
+
+# The cache and a worktree's .venv are on different filesystems, so uv could
+# not hardlink between them anyway.
+link-mode = "copy"

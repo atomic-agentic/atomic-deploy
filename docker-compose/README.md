@@ -61,13 +61,14 @@ Prometheus, Tempo, Loki and Grafana with atomic's dashboards.
 
    A model server on the Docker host is reachable from the container as
    `http://host.docker.internal:<port>`. `ATOMIC_PROJECT_DIR` is the directory
-   holding your `atomic.yaml`; it defaults to the placeholder in `./project`.
-   It is mounted at `/workspace/<ATOMIC_PROJECT_NAME>`. atomic keys its state
-   by that path, so give each project its own name.
+   holding your `atomic.yaml`; it defaults to the example Python project in
+   `./project`. It is mounted at `/workspace/<ATOMIC_PROJECT_NAME>`. atomic
+   keys its state by that path, so give each project its own name.
 
-   If the project's atoms build or test code, set `ATOMIC_PROJECT_IMAGE_DIR`
-   to an image with its toolchain, for example `./project-images/rust`. See
-   [The project image](#the-project-image).
+   The atomic image is built for that project; see
+   [The project image](#the-project-image). The default expects a uv project.
+   For any other, set `ATOMIC_PROJECT_IMAGE_DIR` to `../docker/base` or
+   to an image of your own.
 
 3. **Run.**
 
@@ -77,62 +78,8 @@ Prometheus, Tempo, Loki and Grafana with atomic's dashboards.
    ```
 
    The atomic image is rebuilt on every `up` (`pull_policy: build`), so a
-   newly staged release or a changed project image is always used; unchanged
-   layers come from the cache.
-
-## The project image
-
-Atom commands run inside the atomic container, in Codex's sandbox. An atom
-that is told to run the tests needs the project's compiler and test tools
-there. Model-backed atoms have no shell network by default, so the toolchain
-has to be in the image already: a turn cannot download one.
-
-The `atomic` service therefore runs a **project image** built on atomic's
-runtime image. Compose builds the runtime image from the staged release as
-the build-only `atomic-runtime` service, then builds the directory in
-`ATOMIC_PROJECT_IMAGE_DIR` with `atomic-runtime` mapped to that image:
-
-```dockerfile
-FROM atomic-runtime
-USER root
-RUN apt-get update && apt-get install -y --no-install-recommends <packages> \
-    && rm -rf /var/lib/apt/lists/*
-USER atomic
-```
-
-| Directory | Adds | Image size |
-| --- | --- | --- |
-| [`project-images/base`](project-images/base) | Nothing; the default | about 480 MB |
-| [`project-images/rust`](project-images/rust) | Rust 1.95.0 (rustc, cargo, std, clippy, rustfmt), gcc and libc headers | about 1.6 GB |
-
-A project can keep its own Dockerfile in its repository and point
-`ATOMIC_PROJECT_IMAGE_DIR` at it. The directory is the build context, so use a
-small one such as `.atomic/image/`, not the repository root. Install only what
-the project's atoms run, pin versions, and check every download against a
-checksum you have verified, as the Rust sample does. Switch back to
-`USER atomic` at the end: the runtime expects to run as uid 10001.
-
-The Rust sample installs from Rust's standalone installer rather than rustup,
-so `cargo` and `rustc` are in `/usr/local/bin` and need no `RUSTUP_HOME` in the
-sandbox's environment. Its build compiles, tests, lints and formats a crate as
-the `atomic` user, so a toolchain that cannot link fails the build rather than
-an atom. Two things follow from the design:
-
-- **`rust-toolchain.toml` is not honoured** without rustup. Set the
-  Dockerfile's `RUST_VERSION` (and checksums) to match it.
-- **Dependencies cannot be fetched in a turn.** With no shell network, cargo
-  cannot reach crates.io. Vendor them in the project (`cargo vendor`, with the
-  `[source]` lines it prints committed as `.cargo/config.toml`), or give the
-  atoms that build network access to the registry. A vendored crate builds and
-  tests offline in the sandbox, with `$HOME/.cargo` read-only.
-
-[codex-universal](https://github.com/openai/codex-universal), the image Codex
-cloud starts from, is the other way to do this: every toolchain in several
-versions, picked at start. It is not used here. It is about 11 GB compressed,
-runs as root with its toolchains under `/root`, has neither bubblewrap nor
-tini, and its builds are not reproducible (an unpinned base and `curl | sh`
-installers). It may suit a separate runner container (open question 1) for a
-project that already has a Codex cloud environment.
+   newly staged release, a changed project image or a changed `uv.lock` is
+   always used; unchanged layers come from the cache.
 
    Grafana is at <http://127.0.0.1:3000>. Its home page is the atomic
    Overview; the other dashboards are under **atomic dashboards**.
@@ -143,6 +90,22 @@ host and exporting to the collector on 127.0.0.1:4317:
 ```sh
 docker compose up -d postgres otel-collector prometheus tempo loki grafana
 ```
+
+## The project image
+
+The `atomic` service runs a **project image**: atomic's runtime image plus the
+toolchains and packages the project's atom commands need, because a turn has
+no network to download them. The images and what makes one are described in
+[`../docker`](../docker).
+
+Compose builds the runtime image from the staged release as the build-only
+`atomic-runtime` service, then builds the directory in
+`ATOMIC_PROJECT_IMAGE_DIR` on top of it, with `ATOMIC_PROJECT_DIR` as the
+`project` build context. The default is
+[`../docker/python`](../docker/python), which the
+example project here is set up for. With it, a newly staged release or a
+changed `uv.lock` rebuilds the image on the next `up`, and the container is
+recreated from it, which also resets uv's cache.
 
 ## Check it
 
@@ -172,10 +135,10 @@ two processes with one executor identity can each take the other's runs.
 | [`.env.example`](.env.example) | Every setting, with its default |
 | [`atomic/Dockerfile`](atomic/Dockerfile) | The runtime image: Debian slim, the binary, git, bubblewrap and tini, as a non-root user |
 | [`atomic/stage.sh`](atomic/stage.sh) | Puts a release archive and its checksum in `atomic/dist/` |
-| [`project-images/`](project-images) | Project images built on the runtime image: `base` (the default) and a Rust sample |
+| [`../docker/`](../docker) | Project images built on the runtime image, shared with other deployments: `python` (the default) and `base` |
 | [`postgres/init/10-roles.sh`](postgres/init/10-roles.sh) | First start only: the `atomic` database and three logins |
 | [`collector/postgres.yaml`](collector/postgres.yaml) | Merged over the shared collector config: Postgres metrics |
-| [`project/`](project) | A placeholder atomic project |
+| [`project/`](project) | An example atomic project: a small Python library managed with uv |
 
 ### Postgres logins
 
