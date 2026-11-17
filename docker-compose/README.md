@@ -168,6 +168,9 @@ atomic finds its database through `ATOMIC_DATABASE_URL`, never
   exposing any of them.
 - The `atomic` container runs with `seccomp=unconfined` and
   `apparmor=unconfined`. See the first open question below.
+- Atom commands can read this container's environment, including the
+  database password, and every file in the `atomic-state` volume. See open
+  question 8.
 - `atomic_reader` can read every column of atomic's tables, including
   workflow inputs and outputs. The dashboards select only statuses, names
   and timestamps, but **any Grafana user**, viewers included, can send their
@@ -181,21 +184,38 @@ atomic finds its database through `ATOMIC_DATABASE_URL`, never
 ## Open questions
 
 Running atomic in a container surfaces these. Each is a question for atomic's
-design, not just for this deployment.
+design, not just for this deployment, and each names the beads issue in
+atomic's work graph that tracks it (`bd show <id>` in an atomic checkout).
 
-1. **Codex's sandbox in a container.** Codex runs atom commands in a
-   bubblewrap sandbox, which needs user namespaces and mounts. Docker's
-   default seccomp profile refuses the first (`bwrap: No permissions to
-   create a new namespace`), and its default AppArmor profile refuses the
+1. **Codex's sandbox in a container** (`atomic-hfve.1`). Codex runs atom
+   commands in a bubblewrap sandbox, which needs user namespaces and mounts.
+   Docker's default seccomp profile refuses the first (`bwrap: No permissions
+   to create a new namespace`), and its default AppArmor profile refuses the
    second, so this deployment lifts both for the atomic container. It was
    tested on a host with SELinux enforcing and Docker running without an
    LSM; hosts that restrict unprivileged user namespaces themselves (Ubuntu
-   24.04 and later) need that allowed as well. The choices are a seccomp and
-   AppArmor profile that allow only what bubblewrap needs, running atom
-   commands in a separate runner container and relying on its boundary, or a
-   sandboxed runtime such as gVisor. All of them affect every container and
-   Kubernetes deployment.
-2. **Executor identity and versions.** When atomic recovers unfinished runs
+   24.04 and later) need that allowed as well. Even with both lifted,
+   bubblewrap cannot mount a fresh `/proc` here (`Can't mount proc on /proc:
+   Operation not permitted`) and has to bind the container's own; whether
+   Codex's sandbox does that by itself is not yet confirmed by a real turn.
+   The choices are a seccomp and AppArmor profile that allow only what
+   bubblewrap needs, running atom commands in a separate runner container and
+   relying on its boundary, or a sandboxed runtime such as gVisor. All of
+   them affect every container and Kubernetes deployment.
+
+   **The split is planned.** This deployment runs the control plane and atom
+   commands in one container, so the relaxed profiles, the project's
+   toolchains and the commands sit beside the database credentials and every
+   run's state. atomic plans to run them apart: `atomic serve` and
+   `atomic runner` as separate processes with their own images (M24,
+   `atomic-a6bh`, `atomic-kyuj`), and atom commands on a remote environment
+   through Codex's exec-server, with the thread and checkpoints staying in
+   the control plane (M20, `atomic-7jyf`). Once those land, this deployment
+   becomes an `atomic` service built from the runtime image, with default
+   profiles and no toolchains, and a runner service built from the project
+   image, with no credentials and no route to Postgres.
+2. **Executor identity and versions** (`atomic-ctd6.1`; upgrades: no bead
+   yet). When atomic recovers unfinished runs
    at start-up, the durable engine takes only runs owned by its own executor
    ID, and the ID defaults to `local` when unset. Two processes with the
    default would recover each other's live runs; a process whose ID changes
@@ -206,26 +226,44 @@ design, not just for this deployment.
    defaults to a hash of the binary: after staging a new release, runs left
    unfinished by the old one are not recovered. atomic has to decide how an
    upgrade carries unfinished runs across.
-3. **Health and readiness.** atomic has no health or readiness endpoint yet,
-   so the service has no health check and nothing can wait for it.
-4. **One replica only.** Codex's state database and the attempt worktrees
+3. **Health and readiness** (`atomic-exnm`). atomic has no health or
+   readiness endpoint yet, so the service has no health check and nothing can
+   wait for it.
+4. **One replica only** (`atomic-oqff`, `atomic-2ts7`). Codex's state
+   database and the attempt worktrees
    live in the `atomic-state` volume, which ties the runtime to one host. Even
    a restart that briefly runs two copies, as orchestrators do on update, needs
    the ownership fencing that multi-worker deployments need.
-5. **The project checkout's owner.** atomic runs as uid 10001 and the
+5. **The project checkout's owner** (`atomic-hfve.2`). atomic runs as uid
+   10001 and the
    project is a bind mount owned by the host user. git refuses a repository
    owned by another user ("dubious ownership"), and atomic cannot write the
    checkout's `.git` for worktrees and commits. Either atomic works on a
    clone it owns, or the container runs as the checkout's owner. The `z`
    mount label also relabels the whole project tree on SELinux hosts.
-6. **Counters that start above zero.** Prometheus computes `increase()` from
+6. **Counters that start above zero** (no bead yet). Prometheus computes
+   `increase()` from
    two samples, so a counter whose first export is already above zero (three
    runs recovered as the process starts) counts as nothing. atomic should
    export its counters at zero for the series it knows at start-up. The
    Durable runs dashboard counts recovered runs from the database meanwhile.
-7. **The command.** `atomic serve` does not exist yet, so the container exits
-   with a usage error and restarts. Set `ATOMIC_COMMAND` to try other
-   commands until it does.
+7. **The command** (`atomic-0lv`). `atomic serve` does not exist yet, so the
+   container exits with a usage error and restarts. Set `ATOMIC_COMMAND` to
+   try other commands until it does.
+8. **What atom commands can see** (`atomic-xi0.1`). Codex gives each command
+   the environment of the process that runs it, and its default policy at
+   atomic's pinned revision filters nothing, not even names containing
+   `KEY`, `SECRET` or `TOKEN`. atomic sets no policy, so every atom command,
+   and through its output the model, can read this container's environment,
+   including `ATOMIC_DATABASE_URL` with its password. The sandbox also leaves
+   the whole filesystem readable, so commands can read the `atomic-state`
+   volume: atomic's database, Codex's home and other runs' worktrees. With
+   no shell network a command cannot send any of it anywhere itself, but its
+   output reaches the model and from there commits and messages. This is
+   from reading Codex's source, not yet seen in a live turn. atomic should
+   pass commands only core variables and those their atom declares; until
+   then, keep model keys and other secrets out of this container's
+   environment where you can.
 
 ## Stop and reset
 
