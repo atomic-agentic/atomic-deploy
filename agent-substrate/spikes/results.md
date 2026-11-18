@@ -19,6 +19,7 @@ is `v1.0.1` (`558e3d7`), Codex's is `rust-v0.169.0`. Manifests are in
 | 5 | Codex's sandbox in gVisor | **Works with a runner template and a Codex profile made for it.** With the capabilities Substrate allows adding and a permission profile that extends `:workspace` with the network enabled, Codex 0.169's own sandbox runs in a gVisor actor: workspace writes succeed, writes to `/etc` are refused. Every mode that isolates the network fails, because gVisor cannot configure loopback in a new network namespace; network isolation is Substrate's egress policy instead |
 | 7 | Snapshot and resume | A shallow clone of Kubernetes (334 MB, 32 021 files) made inside the actor: synchronous suspend 1.27 s, 91 MB snapshot, restore from rustfs alone 1.10 s, `git status` clean. Incompressible data is the worst case: 527 MB suspends in 2.2 to 2.7 s, its snapshot is as large, and restores in 1.4 to 1.6 s from rustfs |
 | 6 | kagent bridge | **Works end to end with a stand-in `atomic serve`.** A bring-your-own harness on kagent's Go SDK pauses at a gate as a HITL `tool_approval_request`; kagent stores it, suspends the actor while it waits, and the answer resumes it in 0.17 to 0.27 s. The bridge forwards the decision through an egress grant, and `atomic serve` receives a Substrate actor JWT naming kagent's session. The person is only an assertion: a bare `X-User-Id` header reaches the harness as `Authenticated:true` |
+| 2 | Istio ambient beside Substrate | **Works, with Substrate's egress gateway enrolled by pod.** Istio 1.32.0 ambient installs on k3s with SELinux enforcing. Strict mTLS for the trusted namespaces refuses Substrate's plaintext egress hop until `atenet-egress`'s pods join the mesh; then the hop is mTLS with the egress gateway's SPIFFE identity, which an AuthorizationPolicy can require. Connections pooled before a policy change keep their old admission |
 | 3 | agentgateway as the model gateway | **Works.** An actor holding only a placeholder token calls the chat API; Substrate's egress gateway injects an actor JWT, agentgateway validates it against Substrate's IdP, allows it by atespace with CEL, injects the provider key and reaches Lemonade on the host. No token or a forged token gets 401; an actor in another atespace gets 403 |
 
 ## Host preparation
@@ -273,6 +274,48 @@ only what kagent was told.
 
 Not tried: a gate outliving kagent's 7-day session TTL.
 
+## 2. Istio ambient beside Substrate
+
+Istio 1.32.0 from `https://blob.istio.io/istio-release/charts` (the older
+`istio-release.storage.googleapis.com` index stops before 1.32, and the
+`gcr.io/istio-release` OCI path has no 1.32 charts): `base`, `istiod` and
+`cni` with `profile=ambient` (and `global.platform=k3s` on `cni`), `ztunnel`.
+istio-cni chained itself into k3s's `10-flannel.conflist` and installed
+in-pod rules with `iptables-nft-restore`; nothing needed for SELinux. Footprint:
+istiod 49 MiB, istio-cni 27 MiB, ztunnel 7 MiB.
+
+Substrate's namespaces and kagent's (where kagent's worker pods run) stay out
+of the mesh. [`manifests/ambient.yaml`](manifests/ambient.yaml) holds the
+policies and the enrollment commands.
+
+| Step | Setup | Result |
+| --- | --- | --- |
+| T1 | `atomic` enrolled, permissive | the bridge's decision reaches the stand-in |
+| T2 | `PeerAuthentication` STRICT in `atomic` | **still reached it**, on a connection Substrate's egress gateway had pooled under T1. After restarting the egress gateway: refused, the bridge gets HTTP 503 `connection reset` |
+| — | the same, from a plain pod outside the mesh | connection reset; ztunnel logs it |
+| T3 | `atenet-egress`'s pods enrolled by pod label, plus an additive NetworkPolicy for ambient's probe address `169.254.7.127` | reaches it again over HBONE |
+| T4 | AuthorizationPolicy: only `cluster.local/ns/ate-system/sa/atenet-egress` | the bridge's decision passes, `src.identity="spiffe://cluster.local/ns/ate-system/sa/atenet-egress"`; a mesh pod as `default/default` is refused with `401 Unauthorized` |
+| T5 | `agentgateway-system` enrolled, STRICT | an actor's model call through the egress gateway returns 200 in 1.5 s; plaintext from a pod outside the mesh is reset |
+
+What it shows:
+
+- **The trusted tier can be strict.** The only Substrate component it needs
+  in the mesh is the egress gateway, enrolled by pod label, so worker pods
+  and actors never see ambient's redirection.
+- **Enrolling it takes an extra NetworkPolicy.** Substrate's default-deny in
+  `ate-system` would drop ambient's kubelet probes, which arrive from
+  `169.254.7.127`; an additive policy for that address is enough.
+- **Inbound to the egress gateway is unchanged:** workers outside the mesh
+  still reach it in plaintext, because `ate-system` is not strict.
+- **Policy changes do not reach pooled connections.** The egress gateway
+  reuses upstream connections, and ztunnel judges a connection when it opens
+  (and logs it when it closes), so tightening a policy takes a restart of the
+  egress gateway to take effect.
+- **agentgateway 1.7 works behind ztunnel on Istio 1.32** as an ordinary
+  enrolled workload, although its compatibility table stops at 1.31. Its own
+  mesh integration (`istio.enabled`, HBONE in the proxy) was not needed for
+  L4 mTLS and was not tried.
+
 ## 3. agentgateway as the model gateway
 
 agentgateway v1.7.0 on its own controller (`agentgateway-crds` and
@@ -306,7 +349,7 @@ Notes:
   to trust Substrate's servicedns CA through a backend with TLS.
 - The hop from Substrate's egress gateway to agentgateway is plain HTTP inside
   the cluster; Substrate's egress trusts only public CAs for `https` rules.
-  That hop is what spike 2 (ambient) is meant to cover.
+  Spike 2 makes it mTLS by enrolling the egress gateway's pods.
 - Substrate never suspends an idle actor by itself: the `spikes-other`
   template's golden build waited, without an error, until two running actors
   that filled both workers were suspended, then finished in 3 s.
@@ -351,6 +394,9 @@ suspend, then the first request took 1.61 s (memory fidelity) and 1.37 s
 
 ## State left on the cluster
 
+- Istio 1.32.0 ambient in `istio-system`; `atomic` and `agentgateway-system`
+  enrolled and strict; `atenet-egress` patched with the ambient pod label, and
+  the `ambient-probes` NetworkPolicy in `ate-system`.
 - agentgateway v1.7.0 in `agentgateway-system` with the `ai-gateway` Gateway,
   the `models` namespace pointing at Lemonade, and the `atomic` namespace with
   the `atomic-serve` stand-in.

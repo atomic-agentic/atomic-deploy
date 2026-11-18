@@ -62,8 +62,10 @@ does with its own registry. Images are named `localhost:5000/<name>`.
 
 | 3 | agentgateway as the model gateway | Can an actor reach a model through Substrate's egress gateway and agentgateway, holding no credential, with agentgateway authenticating the actor? | Works |
 
-Spike 9 (one trace per run) waits for the observability stack in the cluster;
-spike 2 for Istio.
+| 2 | Istio ambient beside Substrate | Can the trusted tier be strict mTLS with Substrate out of the mesh, and Substrate's egress hop made mTLS? | Works, enrolling `atenet-egress`'s pods |
+
+Spike 9 (one trace per run) waits for the observability stack in the cluster
+and, for a whole run, for `atomic serve`.
 
 Results go in [`results.md`](results.md), one section per spike, with versions,
 commands and raw output.

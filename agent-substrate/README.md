@@ -46,7 +46,7 @@ there). Two things differ here:
 | Agent Substrate | v1.0.0 (2026-11-05), from the `kagent-dev/substrate` fork's Helm charts | kagent 1.0 requires it and pins the fork (`go.ate.dev/substrate v1.0.0 => github.com/kagent-dev/substrate v1.0.0`). Upstream ships only a Go installer (`ate-setup`) for kind and GKE |
 | kagent | v1.0.1 (2026-11-12) | Charts `oci://ghcr.io/kagent-dev/kagent/helm/{kagent-crds,kagent}`. Every agent is a Substrate actor; there is no Deployment-based runtime any more |
 | agentgateway | v1.7.0 (2026-10-27), its own controller | Charts `oci://cr.agentgateway.dev/charts/{agentgateway-crds,agentgateway}`. Supports Kubernetes 1.32–1.37, Gateway API 1.4–1.6 and Istio 1.23–1.31 |
-| Istio | 1.32.0 (2026-11-09), ambient profile | Supports Kubernetes 1.33–1.37. agentgateway 1.7's compatibility table stops at Istio 1.31, so its mesh integration on 1.32 is checked in spike 2; 1.31.4 is the fallback (it fixes ISTIO-SECURITY-2026-009, which lists 1.30 and 1.31 releases as affected) |
+| Istio | 1.32.0 (2026-11-09), ambient profile, charts from `blob.istio.io` | Supports Kubernetes 1.33–1.37. agentgateway 1.7's compatibility table stops at Istio 1.31, but agentgateway works behind ztunnel on 1.32 as an enrolled workload ([spike 2](spikes/results.md#2-istio-ambient-beside-substrate)); 1.31.4 is the fallback (it fixes ISTIO-SECURITY-2026-009, which lists 1.30 and 1.31 releases as affected) |
 | Gateway API | v1.6.x CRDs | Shared by agentgateway and Istio |
 | gVisor | 20261102.0, inside Substrate's worker pods | Fetched by Substrate's `gvisor-default` SandboxConfig, systrap platform, netstack networking. No host install (decision 3) |
 | Cloud Hypervisor | Kata 4.3.1 stack, inside Substrate's microVM worker pods | Optional second worker pool; this host is bare metal with `/dev/kvm`, so it qualifies |
@@ -303,9 +303,15 @@ sequenceDiagram
    network nobody has tested. gVisor pods in ambient are broken anyway with
    gVisor's default netstack ([istio#58573](https://github.com/istio/istio/issues/58573):
    "Connection reset by peer"; the only workaround, `network=host`, gives up
-   gVisor's network isolation). One exception is a spike: enrolling only the
-   `atenet-egress` pods, because Substrate's egress gateway trusts only public
-   CAs and its hop to agentgateway is otherwise plaintext inside the cluster.
+   gVisor's network isolation). The one exception is the `atenet-egress`
+   pods, enrolled by pod label: Substrate's egress gateway trusts only public
+   CAs, so its hops to `atomic serve` and agentgateway are otherwise plaintext
+   inside the cluster. Spike 2 shows strict mTLS on the trusted side refusing
+   that hop until the egress gateway is enrolled, then admitting it with its
+   SPIFFE identity, which an AuthorizationPolicy can require. Enrolling it
+   needs an additive NetworkPolicy for ambient's probe address, and a mesh
+   policy change reaches the egress gateway's pooled connections only after a
+   restart ([results](spikes/results.md#2-istio-ambient-beside-substrate)).
 5. **agentgateway is the one model and MCP gateway.** It holds every provider
    key; nothing else does. Backends: the local vLLM (OpenAI-compatible,
    Responses for Codex) and, optionally, a cloud provider. Callers
