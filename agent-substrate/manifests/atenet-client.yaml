@@ -1,0 +1,7 @@
+# The identity `kubectl ate proxy` presents to Substrate's router, allowed in
+# values/substrate.yaml. kagent's install does not create it.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: atenet-client
+  namespace: ate-system

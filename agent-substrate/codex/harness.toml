@@ -1,0 +1,20 @@
+# Codex configuration for harness mode: Codex runs inside the actor and calls
+# the model through agentgateway. The API key is a placeholder; Substrate's
+# egress gateway replaces the Authorization header with an actor JWT.
+# MODEL_NAME is filled in from .env (check.sh does; atomic will).
+model = "${MODEL_NAME}"
+model_provider = "agw"
+approval_policy = "never"
+# The profile from findings.md, spike 5: Codex's filesystem sandbox, with the
+# network left to Substrate's egress policy (gVisor cannot isolate it).
+default_permissions = "actor"
+
+[model_providers.agw]
+name = "agentgateway"
+base_url = "http://ai-gateway.agentgateway-system.svc.cluster.local/v1"
+wire_api = "responses"
+env_key = "AGW_KEY"
+
+[permissions.actor]
+extends = ":workspace"
+network.enabled = true

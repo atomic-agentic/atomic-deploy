@@ -1,0 +1,58 @@
+# Istio 1.32 ambient beside Substrate (findings.md, spike 2). Applied by up.sh
+# before any actor traffic (atomic-1b7t.7), with the enrollment it does by
+# label: the atomic namespace (namespaces.yaml), agentgateway-system, and
+# atenet-egress's pods, by a patch to its Deployment, since Substrate's chart
+# has no setting for pod labels. A helm upgrade of Substrate drops that patch;
+# up.sh puts it back.
+#
+# Substrate's namespaces stay out of the mesh except atenet-egress's pods, so
+# its hop to atomic serve and to agentgateway is mTLS.
+
+# Strict mTLS for atomic serve (for now its stand-in) and for agentgateway.
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: strict
+  namespace: atomic
+spec:
+  mtls:
+    mode: STRICT
+---
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: strict
+  namespace: agentgateway-system
+spec:
+  mtls:
+    mode: STRICT
+---
+# Only Substrate's egress gateway may call atomic serve's gate endpoint.
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: from-substrate-egress
+  namespace: atomic
+spec:
+  selector:
+    matchLabels: {app: atomic-serve}
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals: ["cluster.local/ns/ate-system/sa/atenet-egress"]
+---
+# Additive to Substrate's NetworkPolicies: ambient sends kubelet probes to an
+# enrolled pod from 169.254.7.127, which Substrate's default-deny would drop.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ambient-probes
+  namespace: ate-system
+spec:
+  podSelector:
+    matchLabels: {app: atenet-egress}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - ipBlock: {cidr: 169.254.7.127/32}

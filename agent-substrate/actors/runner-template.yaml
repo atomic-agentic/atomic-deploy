@@ -1,0 +1,45 @@
+# The runner's ActorTemplate, a Substrate API record (kubectl ate create
+# actor-template -f), not a Kubernetes object. One template for both
+# placements: Codex runs in the actor (harness mode) or only its commands do,
+# through exec-server (execution-only, the default; design decision 7).
+#
+#   - Memory fidelity, so a suspend that lands mid-turn is survivable
+#     (findings.md, spike 11); atomic still suspends only on the runner's
+#     quiescence report (spike 12).
+#   - CODEX_HOME on the durable /work, set in the image (spike 10).
+#   - The capabilities Codex's bwrap sandbox needs in gVisor (spike 5), with
+#     the profile in codex/harness.toml.
+#
+# up.sh fills in ATESPACE and RUNNER_IMAGE (by digest). Templates cannot be
+# changed in place: up.sh deletes and recreates this one when the image
+# changes, which fails while actors from it exist.
+metadata:
+  atespace: ${ATESPACE}
+  name: runner
+workerSelector:
+  matchLabels:
+    workload: atomic-runner
+containers:
+  - name: runner
+    image: ${RUNNER_IMAGE}
+    securityContext:
+      capabilities:
+        add: [AUDIT_WRITE, CHOWN, DAC_OVERRIDE, FOWNER, FSETID, KILL, NET_BIND_SERVICE,
+              SETFCAP, SETGID, SETPCAP, SETUID, SYS_CHROOT]
+    wakeupProbe:
+      httpGet:
+        path: /readyz
+        port: 80
+    volumeMounts:
+      - name: work
+        mountPath: /work
+resources:
+  limits:
+    cpuMillicores: 1000
+    memoryBytes: 805306368
+snapshotConfig:
+  preferredFidelity: SNAPSHOT_FIDELITY_MEMORY
+  storageLocation: s3://ate-snapshots/atomic
+volumes:
+  - name: work
+    durableDir: {}

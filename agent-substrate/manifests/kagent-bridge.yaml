@@ -1,0 +1,55 @@
+# The kagent bridge (findings.md, spike 6) as a kagent bring-your-own harness,
+# and an agent that uses it. kagent requires the image pinned by digest; up.sh
+# fills in BRIDGE_IMAGE. The EgressPolicy lets the bridge reach atomic serve
+# (for now the stand-in in atomic-serve-stub.yaml) and has Substrate's egress
+# gateway put an actor JWT in its Authorization header.
+apiVersion: api.kagent.dev/v1alpha3
+kind: Harness
+metadata:
+  name: atomic-bridge
+  namespace: kagent
+spec:
+  byo: {}
+  workload:
+    image: ${BRIDGE_IMAGE}
+    command: ["/bridge"]
+  env:
+    - name: ATOMIC_URL
+      value: http://atomic-serve.atomic.svc.cluster.local
+  substrate:
+    workerPoolRef:
+      name: kagent-default
+    snapshotPolicy:
+      location: s3://ate-snapshots/kagent/
+---
+apiVersion: api.kagent.dev/v1alpha3
+kind: EgressPolicy
+metadata:
+  name: atomic-serve
+  namespace: kagent
+spec:
+  destinations:
+    - origin: http://atomic-serve.atomic.svc.cluster.local
+      authentication:
+        header: Authorization
+        prefix: "Bearer "
+        actorJwt:
+          audiences: [atomic-serve]
+          expirationSeconds: 900
+---
+apiVersion: api.kagent.dev/v1alpha3
+kind: Agent
+metadata:
+  name: atomic-bridge
+  namespace: kagent
+spec:
+  template:
+    inline:
+      description: Starts an atomic workflow run and pauses at its gates (a stub until atomic serve)
+      modelConfig:
+        name: default-model-config
+      systemPrompt: Unused by the bring-your-own bridge.
+  harnessRef:
+    name: atomic-bridge
+  egressPolicyRefs:
+    - name: atomic-serve

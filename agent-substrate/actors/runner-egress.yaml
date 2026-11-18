@@ -1,0 +1,17 @@
+# Egress for a runner actor in harness mode: only the model gateway, with the
+# placeholder Authorization header replaced by an actor JWT for audience
+# ai-gateway. Egress policies are per actor (kubectl ate create egress-policy
+# <actor> -f), so atomic attaches one to each actor it creates; an actor in
+# execution-only placement needs none, since Codex calls the model from the
+# control plane.
+rules:
+  - http:
+      hostnames: ["ai-gateway.agentgateway-system.svc.cluster.local"]
+      ports: {numbers: [80]}
+      effects:
+        replaceHeaders:
+          - header: Authorization
+            prefix: "Bearer "
+            actorJwt:
+              audiences: ["ai-gateway"]
+              expirationSeconds: 900
