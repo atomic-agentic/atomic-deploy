@@ -62,6 +62,7 @@ does with its own registry. Images are named `localhost:5000/<name>`.
 
 | 3 | agentgateway as the model gateway | Can an actor reach a model through Substrate's egress gateway and agentgateway, holding no credential, with agentgateway authenticating the actor? | Works |
 
+| 10 | A Codex atom end to end | Does a real Codex atom work in harness mode and in execution-only placement, through the model gateway? | Works in both |
 | 2 | Istio ambient beside Substrate | Can the trusted tier be strict mTLS with Substrate out of the mesh, and Substrate's egress hop made mTLS? | Works, enrolling `atenet-egress`'s pods |
 
 Spike 9 (one trace per run) waits for the observability stack in the cluster

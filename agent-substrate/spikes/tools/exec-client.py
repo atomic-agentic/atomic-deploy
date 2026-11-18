@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """A minimal Codex exec-server client for spike 4. Standard library only.
 
-  python3 -I exec-client.py ws://127.0.0.1:18130/ [--argv sh -c 'echo hi']
+  python3 -I exec-client.py ws://127.0.0.1:18130/ [--env K=V ...] [--argv sh -c 'echo hi']
 
 Follows exec-server's documented lifecycle (codex-rs/exec-server/README.md at
 rust-v0.169.0): initialize, initialized, process/start, then process/read until
@@ -62,6 +62,8 @@ class Session:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("url")
+    ap.add_argument("--env", action="append", default=[], metavar="KEY=VALUE",
+                    help="environment for the command, on top of PATH and HOME")
     ap.add_argument("--argv", nargs=argparse.REMAINDER,
                     default=["sh", "-c", "echo hello from $(uname -r); id -u"])
     a = ap.parse_args()
@@ -74,7 +76,8 @@ def main():
     s.send({"jsonrpc": "2.0", "method": "initialized", "params": {}})
     t0 = time.monotonic()
     r = s.call("process/start", {"processId": "p1", "argv": a.argv, "cwd": "file:///work",
-                                  "env": {"PATH": "/usr/local/bin:/usr/bin:/bin"},
+                                  "env": {"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": "/root",
+                                          **dict(e.split("=", 1) for e in a.env)},
                                   "tty": False, "pipeStdin": False, "arg0": None})
     print(f"process/start: {json.dumps(r)[:300]}")
     if "error" in r:

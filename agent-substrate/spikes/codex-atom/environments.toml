@@ -1,0 +1,8 @@
+# The actor as Codex's only environment, reached through `kubectl ate proxy`
+# (the router's CONNECT path) on 127.0.0.1:18220 -> the actor's exec-server.
+default = "actor"
+include_local = false
+
+[[environments]]
+id = "actor"
+url = "ws://127.0.0.1:18220"

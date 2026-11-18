@@ -19,6 +19,7 @@ is `v1.0.1` (`558e3d7`), Codex's is `rust-v0.169.0`. Manifests are in
 | 5 | Codex's sandbox in gVisor | **Works with a runner template and a Codex profile made for it.** With the capabilities Substrate allows adding and a permission profile that extends `:workspace` with the network enabled, Codex 0.169's own sandbox runs in a gVisor actor: workspace writes succeed, writes to `/etc` are refused. Every mode that isolates the network fails, because gVisor cannot configure loopback in a new network namespace; network isolation is Substrate's egress policy instead |
 | 7 | Snapshot and resume | A shallow clone of Kubernetes (334 MB, 32 021 files) made inside the actor: synchronous suspend 1.27 s, 91 MB snapshot, restore from rustfs alone 1.10 s, `git status` clean. Incompressible data is the worst case: 527 MB suspends in 2.2 to 2.7 s, its snapshot is as large, and restores in 1.4 to 1.6 s from rustfs |
 | 6 | kagent bridge | **Works end to end with a stand-in `atomic serve`.** A bring-your-own harness on kagent's Go SDK pauses at a gate as a HITL `tool_approval_request`; kagent stores it, suspends the actor while it waits, and the answer resumes it in 0.17 to 0.27 s. The bridge forwards the decision through an egress grant, and `atomic serve` receives a Substrate actor JWT naming kagent's session. The person is only an assertion: a bare `X-User-Id` header reaches the harness as `Authenticated:true` |
+| 10 | A Codex atom end to end | **Works in both placements.** Codex 0.169 fixed a failing test in 8 to 9 s on the local model: in harness mode inside a gVisor actor with its own sandbox on and model calls through agentgateway with an actor JWT, and in execution-only placement from outside the actor with commands through exec-server and the router. A volumes-only suspend loses Codex's `CODEX_HOME`, and a Codex started without its configuration retries forever |
 | 2 | Istio ambient beside Substrate | **Works, with Substrate's egress gateway enrolled by pod.** Istio 1.32.0 ambient installs on k3s with SELinux enforcing. Strict mTLS for the trusted namespaces refuses Substrate's plaintext egress hop until `atenet-egress`'s pods join the mesh; then the hop is mTLS with the egress gateway's SPIFFE identity, which an AuthorizationPolicy can require. Connections pooled before a policy change keep their old admission |
 | 3 | agentgateway as the model gateway | **Works.** An actor holding only a placeholder token calls the chat API; Substrate's egress gateway injects an actor JWT, agentgateway validates it against Substrate's IdP, allows it by atespace with CEL, injects the provider key and reaches Lemonade on the host. No token or a forged token gets 401; an actor in another atespace gets 403 |
 
@@ -418,6 +419,53 @@ detected and the client reconnects from the last event; every attempt has a
 deadline atomic enforces itself. An exec-server WebSocket is presumably cut by
 a router restart in the same way (not tested), which gap 5 already treats as a
 failed attempt.
+
+## 10. A Codex atom end to end, in both placements
+
+One small coding atom, run for real in each placement: a repository with
+`add` returning `a - b` and a test that catches it
+([`codex-atom/setup-task.sh`](codex-atom/setup-task.sh)), and the prompt in
+[`codex-atom/prompt.txt`](codex-atom/prompt.txt). Codex `rust-v0.169.0`, the
+local Qwen3.6-35B-A3B on Lemonade, the [Codex runner
+image](images/codex-runner) (Codex, its bwrap, exec-server and git) in a gVisor
+actor from [`manifests/codex-runner-template.yaml`](manifests/codex-runner-template.yaml),
+with the capabilities spike 5 found and a durable `/work`.
+
+| | Harness mode | Execution-only |
+| --- | --- | --- |
+| Codex runs | in the actor | outside it (a container on the host, standing in for `atomic serve`) |
+| Commands run | in the actor, in Codex's sandbox (profile extending `:workspace`, network enabled) | in the actor, through exec-server and the router's `CONNECT` path (`environments.toml` with the actor as the only environment); `:danger-full-access` there |
+| Model calls | actor → egress gateway (actor JWT replaces the placeholder) → agentgateway → Lemonade | control plane → Lemonade directly |
+| Actor egress policy | the model gateway only ([`codex-runner-egress.yaml`](manifests/codex-runner-egress.yaml)) | none at all |
+| Configuration | [`harness-config.toml`](codex-atom/harness-config.toml) | [`exec-only-config.toml`](codex-atom/exec-only-config.toml), [`environments.toml`](codex-atom/environments.toml) |
+| Result | fixed (`a - b` → `a + b`), test prints `ok`, in 9 s | fixed, test prints `ok`, in 8 s |
+| Commands | 4 (`cat` ×2, `sed`, the test) | 3 (`cat`, `sed`, the test) |
+| Tokens | 26 848 in (20 154 cached), 286 out | 26 353 in (25 673 cached), 303 out |
+
+Both work, at the same speed for an atom this size. What it took, and what it
+showed:
+
+- **agentgateway must be told a route is the Responses API.** A backend
+  parses every request as chat completions unless `policies.ai.routes` maps
+  the path (`"/v1/responses": Responses`); without it Codex's first turn
+  failed with `failed to parse Completions request: missing field messages`.
+  Lemonade serves `/v1/responses`, so no translation was needed. Codex used
+  plain HTTP streaming to a custom provider, not its Responses WebSocket.
+- **A misconfigured Codex never fails on its own.** The first harness run
+  started without its configuration (the command's environment lacked
+  `CODEX_HOME`), fell back to OpenAI's provider and its Responses WebSocket,
+  was refused by the egress gateway, and logged `Reconnecting... waiting for
+  network` for 10 minutes until stopped. Only an attempt deadline ends that.
+- **Execution-only needs the working directory to exist locally.** Codex
+  checks `-C` on its own filesystem before it uses the remote environment;
+  with an empty local `/work/task` it read, changed and tested the files that
+  exist only in the actor, and the local directory stayed empty.
+- **Codex's state does not survive a volumes-only suspend.** In harness mode
+  `CODEX_HOME` (`config.toml`, `state_5.sqlite` with the thread, logs and
+  memories) was on the actor's root filesystem; after a synchronous suspend
+  at volumes fidelity and a resume it was gone, while the uncommitted fix in
+  the durable `/work` was intact. A harness runner keeps `CODEX_HOME` on the
+  durable directory, or restores it, and must not start Codex unconfigured.
 
 ## 3. agentgateway as the model gateway
 
