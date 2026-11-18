@@ -1,0 +1,30 @@
+# Spike 1: Substrate's counter demo (demos/counter at 3d574499), adapted for
+# this install. Two workers, so an actor can resume on a different one.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ate-demo-counter
+---
+apiVersion: ate.dev/v1
+kind: WorkerPool
+metadata:
+  name: counter
+  namespace: ate-demo-counter
+  labels:
+    workload: counter
+spec:
+  replicas: 2
+  # The worker image kagent's own pool runs.
+  workerImage: ghcr.io/kagent-dev/substrate/ateworker-gvisor:v1.0.0
+  sandboxClasses:
+    - name: gvisor
+      configRef:
+        name: gvisor-default
+  template:
+    resources:
+      limits:
+        cpu: "1"
+        memory: 1Gi
+      requests:
+        cpu: 250m
+        memory: 1Gi

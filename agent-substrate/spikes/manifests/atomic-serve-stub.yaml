@@ -1,0 +1,36 @@
+# Spike 6: a stand-in for atomic serve. The probe image on plain runc, which
+# answers any POST with the request it received (headers, the claims of a JWT
+# in Authorization with its signature redacted, and the body).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: atomic
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: atomic-serve
+  namespace: atomic
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: atomic-serve}
+  template:
+    metadata:
+      labels: {app: atomic-serve}
+    spec:
+      containers:
+        - name: stub
+          image: localhost:5000/substrate-probe@sha256:e3b2629df0840edef0c61e8cf1c40787852389a80dd9bfea9ede77c6df9e39b1
+          ports: [{containerPort: 80, name: http}]
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: atomic-serve
+  namespace: atomic
+spec:
+  selector: {app: atomic-serve}
+  ports: [{name: http, port: 80, targetPort: http}]

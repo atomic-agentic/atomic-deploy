@@ -1,0 +1,18 @@
+# Codex configuration for harness mode: Codex runs inside the actor and calls
+# the model through agentgateway. The API key is a placeholder; Substrate's
+# egress gateway replaces the Authorization header with an actor JWT.
+model = "Qwen3.6-35B-A3B-MTP-GGUF-UD-Q4_K_XL"
+model_provider = "agw"
+approval_policy = "never"
+# Spike 5's profile: Codex's filesystem sandbox, network left to Substrate.
+default_permissions = "actor"
+
+[model_providers.agw]
+name = "agentgateway"
+base_url = "http://ai-gateway.agentgateway-system.svc.cluster.local/v1"
+wire_api = "responses"
+env_key = "AGW_KEY"
+
+[permissions.actor]
+extends = ":workspace"
+network.enabled = true

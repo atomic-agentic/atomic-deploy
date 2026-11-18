@@ -1,0 +1,10 @@
+# kagent CLI configuration for the spikes: `kagent --config config.yaml install`.
+# Chart repositories and versions are the CLI's defaults for v1.0.1.
+install:
+  defaultModelProvider: OpenAI
+  atelet:
+    valuesFiles:
+      - atelet-values.yaml
+  substrate:
+    valuesFiles:
+      - substrate-values.yaml

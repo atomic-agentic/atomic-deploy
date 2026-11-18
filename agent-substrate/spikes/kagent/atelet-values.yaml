@@ -1,0 +1,11 @@
+# atelet pulls actor images from inside its pod, where localhost is the pod.
+# Images named localhost:5000/... come from the registry on docker0 instead,
+# as Substrate's kind setup does with its kind-registry container.
+#
+# Spike 7 only: drop node-local snapshot copies after 90 s instead of 30 min
+# (and upload after 30 s instead of 5 min), so a resume restores from rustfs.
+atelet:
+  extraArgs:
+    - --localhost-registry-replacement=172.17.0.1:5000
+    - --snapshot-upload-delay=30s
+    - --snapshot-detach-delay=90s

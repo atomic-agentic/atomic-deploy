@@ -1,0 +1,26 @@
+# Spike 5: Codex rust-v0.169.0's own sandbox command in a gVisor actor, with every capability Substrate allows.
+metadata:
+  atespace: spikes
+  name: codex-probe-caps
+workerSelector:
+  matchLabels:
+    workload: counter
+containers:
+  - name: probe
+    image: localhost:5000/substrate-codex-probe@sha256:7f5c9596ddfa904ad028b7f33365d457a3f407fac21aec55ceb029e5de2cbbc9
+    securityContext:
+      capabilities:
+        # Every capability Substrate's admission allows adding.
+        add: [AUDIT_WRITE, CHOWN, DAC_OVERRIDE, FOWNER, FSETID, KILL, NET_BIND_SERVICE,
+              SETFCAP, SETGID, SETPCAP, SETUID, SYS_CHROOT]
+    wakeupProbe:
+      httpGet:
+        path: /readyz
+        port: 80
+resources:
+  limits:
+    cpuMillicores: 500
+    memoryBytes: 536870912
+snapshotConfig:
+  preferredFidelity: SNAPSHOT_FIDELITY_MEMORY
+  storageLocation: s3://ate-snapshots/spikes
