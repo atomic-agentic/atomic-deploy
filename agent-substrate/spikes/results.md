@@ -20,6 +20,8 @@ is `v1.0.1` (`558e3d7`), Codex's is `rust-v0.169.0`. Manifests are in
 | 7 | Snapshot and resume | A shallow clone of Kubernetes (334 MB, 32 021 files) made inside the actor: synchronous suspend 1.27 s, 91 MB snapshot, restore from rustfs alone 1.10 s, `git status` clean. Incompressible data is the worst case: 527 MB suspends in 2.2 to 2.7 s, its snapshot is as large, and restores in 1.4 to 1.6 s from rustfs |
 | 6 | kagent bridge | **Works end to end with a stand-in `atomic serve`.** A bring-your-own harness on kagent's Go SDK pauses at a gate as a HITL `tool_approval_request`; kagent stores it, suspends the actor while it waits, and the answer resumes it in 0.17 to 0.27 s. The bridge forwards the decision through an egress grant, and `atomic serve` receives a Substrate actor JWT naming kagent's session. The person is only an assertion: a bare `X-User-Id` header reaches the harness as `Authenticated:true` |
 | 10 | A Codex atom end to end | **Works in both placements.** Codex 0.169 fixed a failing test in 8 to 9 s on the local model: in harness mode inside a gVisor actor with its own sandbox on and model calls through agentgateway with an actor JWT, and in execution-only placement from outside the actor with commands through exec-server and the router. A volumes-only suspend loses Codex's `CODEX_HOME`, and a Codex started without its configuration retries forever |
+| 11 | Suspending while Codex is busy | **Memory fidelity survives it, volumes fidelity loses the turn silently.** Suspended while running a command, a memory-fidelity actor resumed and Codex completed the turn; at volumes fidelity every process was gone and Codex's events stayed "in progress" forever, though `codex exec resume` could finish it by re-running the command. Time inside the actor stops while suspended |
+| 12 | Suspending only on quiescence | **Works.** A runner report built from Codex's events, `/proc`, `/proc/net/tcp` and git held off a suspend through a Codex turn, uncommitted output and a leftover background process, then suspended after the idle period; after a suspend that ignored it, it reported the turn `lost` |
 | 2 | Istio ambient beside Substrate | **Works, with Substrate's egress gateway enrolled by pod.** Istio 1.32.0 ambient installs on k3s with SELinux enforcing. Strict mTLS for the trusted namespaces refuses Substrate's plaintext egress hop until `atenet-egress`'s pods join the mesh; then the hop is mTLS with the egress gateway's SPIFFE identity, which an AuthorizationPolicy can require. Connections pooled before a policy change keep their old admission |
 | 3 | agentgateway as the model gateway | **Works.** An actor holding only a placeholder token calls the chat API; Substrate's egress gateway injects an actor JWT, agentgateway validates it against Substrate's IdP, allows it by atespace with CEL, injects the provider key and reaches Lemonade on the host. No token or a forged token gets 401; an actor in another atespace gets 403 |
 
@@ -466,6 +468,110 @@ showed:
   at volumes fidelity and a resume it was gone, while the uncommitted fix in
   the durable `/work` was intact. A harness runner keeps `CODEX_HOME` on the
   durable directory, or restores it, and must not start Codex unconfigured.
+
+## 11. Suspending an actor while Codex is busy
+
+Substrate has no idle signal (see Three findings), so atomic decides when an
+actor may be suspended. What happens if it suspends while Codex is mid-turn,
+and what tells it Codex is busy? Harness mode, `CODEX_HOME` on the durable
+`/work` (so only the turn is at risk), and a task whose turn lasts about a
+minute: Codex must run [`slow.sh`](codex-atom/turn-setup.sh) (60 s) and wait
+for it. [`tools/turn-spike.sh`](tools/turn-spike.sh) starts the turn detached
+([`turn-start.sh`](codex-atom/turn-start.sh)), waits until the command is
+running, records what is visible ([`turn-state.py`](codex-atom/turn-state.py)),
+suspends synchronously, waits 20 s, resumes, and follows the turn.
+
+| | Memory fidelity ([template](manifests/codex-runner-memory-template.yaml)) | Volumes fidelity (kagent's) |
+| --- | --- | --- |
+| Busy before the suspend | `item.started` for `./slow.sh` with no `item.completed`, no `turn.completed`; processes: `codex exec`, Codex's sandbox helper, `bwrap`, the script | the same |
+| Suspend (sync) | 0.33 s | 0.15 s |
+| Resume | 0.08 s | 0.31 s |
+| After resume | every process still there; the script finished, Codex made its next model call, the turn completed with exit 0 and the right answer | **every process gone**, including the wrapper that records Codex's exit code; the event stream frozen at `item.started`, with no `turn.failed`, still "in progress" 3 minutes later |
+| Codex's state | intact | intact on the durable `/work`; `codex exec resume <thread>` completed the task in 64 s, **re-running the command** ("Let me run it again") |
+
+What it shows:
+
+- **At memory fidelity a busy turn survives a suspend,** at least when Codex
+  is waiting on a command rather than on a model response: the processes and
+  their sandbox are restored, and the next model call is a new connection.
+  A suspend while a model response is streaming was not caught in this run.
+- **Time inside the actor stops while it is suspended.** The script logged
+  `started 03:53:59, finished 03:55:20`: 81 s for a `sleep 60` that spent 20 s
+  suspended. Deadlines kept inside the actor slip by the time suspended, so
+  atomic keeps attempt deadlines outside.
+- **At volumes fidelity a busy turn is lost, and nothing says so.** Codex's
+  own signals stay at "in progress" forever; only the process list, or an
+  external deadline, shows the turn is gone.
+- **The lost turn can be resumed if `CODEX_HOME` survived,** but whatever was
+  in flight runs again: at-least-once, as durare treats a re-run step.
+- **Signals atomic can use for "busy":** an `item.started` without its
+  `item.completed`, or no `turn.completed`, in Codex's JSON events; a live
+  `codex exec` process or any process the attempt started. "Not busy" is the
+  conjunction of all of them, which is what the runner's quiescence report
+  (`atomic-1b7t.21`) has to establish.
+
+## 12. A quiescence report, and suspending only on it
+
+Spike 11's answer, prototyped: the runner reports whether its actor is safe
+to suspend, and the control plane suspends only on that report.
+
+- **The report** ([`images/probe/server.py`](images/probe/server.py),
+  `GET /quiescence`, in the [Codex runner image](images/codex-runner)): 200
+  when quiescent, 409 otherwise, with the reasons. Quiescent means all of:
+  Codex's JSON event log for the attempt has no open turn and no open item; no
+  process is alive other than the runner's own (not filtered by parent, since
+  an attempt's orphaned processes are reparented to PID 1, which may be the
+  runner); no exec-server session is connected (`/proc/net/tcp`, which gVisor
+  provides); the worktree is committed and pushed; `CODEX_HOME` is on the
+  durable directory. A third state, `lost`, is an open turn in Codex's log
+  with no Codex process alive (spike 11's silent case). A sampler every 2 s
+  gives `quiescent_for_s`, so an idle timer counts from quiescence, in actor
+  time.
+- **The control plane's side** ([`tools/suspend-when-quiescent.sh`](tools/suspend-when-quiescent.sh)):
+  suspend once quiescent for the idle period; on `lost`, do not suspend and
+  hand the attempt to atomic to fail or resume; at a deadline, report "still
+  busy" without suspending.
+- **The runner template** ([`manifests/codex-runner-q-template.yaml`](manifests/codex-runner-q-template.yaml)):
+  memory fidelity, `CODEX_HOME=/work/codex-home` set in the image.
+
+[`tools/quiescence-spike.sh`](tools/quiescence-spike.sh) ran three cases:
+
+**Q1, a normal attempt** (memory fidelity, idle period 10 s): the driver's view,
+
+```text
+t=0s   quiescent: -                                  (freshly resumed, no work yet)
+t=3s   busy: 4 attempt process(es) alive; 1 exec-server session(s) open
+t=6s   busy: Codex turn open (command_execution in progress); 7 attempt process(es) alive
+t=67s  busy: Codex turn open (no item in progress); 2 attempt process(es) alive; worktree has uncommitted or unpushed work
+t=70s  busy: worktree has uncommitted or unpushed work
+t=91s  quiescent: -                                  (the runner stand-in committed)
+t=103s quiescent for 12.1 s >= 10 s: suspended (sync) in 0.41 s
+```
+
+**Q2, a background process left behind:** `setsid -f sleep 120` kept the
+actor `busy: 1 attempt process(es) alive` until the driver's 30 s deadline
+(not suspended); once it was killed, the actor suspended after its 5 s idle
+period.
+
+**Q3, a suspend that ignored quiescence** (volumes fidelity): suspended while
+the report said `busy: Codex turn open (command_execution in progress); 7
+attempt process(es) alive`; after the resume the report said `lost`, and the
+driver did not suspend. Codex's own events alone would have said "in
+progress" indefinitely.
+
+What it settles, and what it leaves to atomic:
+
+- **The signal is implementable inside the actor, from what is already
+  there:** Codex's `--json` events, `/proc`, `/proc/net/tcp` and git, with no
+  help from Substrate or from Codex.
+- **A freshly resumed actor is quiescent until work arrives** (Q1 at t=0), so
+  the control plane must not run an idle-suspend against an actor it is about
+  to dispatch to. The idle period covers the gap here; atomic should also
+  skip actors with an attempt being dispatched.
+- **`lost` is a distinct answer, not a kind of busy:** the attempt is over
+  and must be failed or resumed (`codex exec resume`, at-least-once).
+- In atomic this belongs to `atomic runner` and `atomic serve`
+  (`atomic-1b7t.21`); the prototype is the contract to build to.
 
 ## 3. agentgateway as the model gateway
 
