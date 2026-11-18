@@ -21,6 +21,8 @@ m=[m for m in t.getmembers() if m.isfile()][0]; open("/codex-exec-server","wb").
 
 FROM probe
 COPY --from=exec /codex-exec-server /usr/local/bin/codex-exec-server
-RUN mkdir -p /work /var/lib/codex-home
+# git, for spike 7's realistic worktree: a clone made inside the actor.
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
+    && rm -rf /var/lib/apt/lists/* && mkdir -p /work /var/lib/codex-home
 ENV CODEX_HOME=/var/lib/codex-home
 CMD ["sh", "-c", "codex-exec-server --listen ws://0.0.0.0:8080 & exec python3 -I -u /opt/probe/server.py"]

@@ -12,12 +12,17 @@
 package main
 
 import (
+	"bytes"
 	"cmp"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"iter"
+	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	a2atype "github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
@@ -60,6 +65,34 @@ func caller(request *a2asrv.ExecutorContext) string {
 	return strings.Join(parts, " ")
 }
 
+// forward sends the decision to atomic serve (ATOMIC_URL) the way the real
+// bridge would. The Authorization header carries a placeholder: Substrate's
+// egress gateway replaces it with an actor JWT when the agent's EgressPolicy
+// grants one for that origin, so no credential is ever in the actor.
+func forward(request *a2asrv.ExecutorContext, d apia2a.ToolApproval) string {
+	target := os.Getenv("ATOMIC_URL")
+	if target == "" {
+		return "No ATOMIC_URL: nothing forwarded."
+	}
+	body, _ := json.Marshal(map[string]any{
+		"task": request.TaskID, "context": request.ContextID, "gate": d.ID,
+		"approved": d.Approved, "reason": d.RejectionReason, "principal": caller(request),
+	})
+	req, err := http.NewRequest(http.MethodPost, target+"/v1/gates/decisions", bytes.NewReader(body))
+	if err != nil {
+		return "forward: " + err.Error()
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer kagent-placeholder")
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	if err != nil {
+		return "forward failed: " + err.Error()
+	}
+	defer resp.Body.Close()
+	echoed, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+	return fmt.Sprintf("Forwarded to %s: HTTP %d. atomic serve stand-in saw: %s", target, resp.StatusCode, echoed)
+}
+
 func (bridge) Execute(_ context.Context, request *a2asrv.ExecutorContext) iter.Seq2[a2atype.Event, error] {
 	return func(yield func(a2atype.Event, error) bool) {
 		var info a2atype.TaskInfoProvider = request
@@ -76,8 +109,9 @@ func (bridge) Execute(_ context.Context, request *a2asrv.ExecutorContext) iter.S
 				}
 				if err == nil {
 					d := decided.Approvals[0]
-					text := fmt.Sprintf("Gate %s decided: approved=%v reason=%q. Caller as the harness sees it: %s. "+
-						"The bridge would now send this decision to atomic serve.", d.ID, d.Approved, d.RejectionReason, caller(request))
+					text := fmt.Sprintf("Gate %s decided: approved=%v reason=%q. Caller as the harness sees it: %s. ",
+						d.ID, d.Approved, d.RejectionReason, caller(request))
+					text += forward(request, d)
 					yield(a2atype.NewStatusUpdateEvent(request, a2atype.TaskStateCompleted, reply(&info, text)), nil)
 					return
 				}

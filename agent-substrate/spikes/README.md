@@ -58,10 +58,12 @@ does with its own registry. Images are named `localhost:5000/<name>`.
 | 4 | WebSocket through the router (`atomic-2h8u`) | Does an inbound WebSocket upgrade reach an actor through `atenet-router`? A plain echo actor first; Codex's exec-server only if that works | Works; a session cannot span a suspend |
 | 5 | Codex's sandbox in gVisor (`atomic-k0dx`) | Can bubblewrap create its namespaces inside a gVisor actor? The [AWS spikes'](../../aws-lambda/spikes) sandbox probe, served over HTTP since actors have no exec API | Works with the right template and Codex profile |
 | 7 | Snapshot and resume (`atomic-klse`) | Volume snapshot size and synchronous suspend and resume times with a large worktree in the actor's durable directory | Done, node-local restores only |
-| 6 | kagent bridge | Can a bring-your-own harness, built from kagent's `byoa2a` example, show a gate as `input-required`, be suspended, and resume when answered? | Works on kagent's side; forwarding to atomic not tried |
+| 6 | kagent bridge | Can a bring-your-own harness, built from kagent's `byoa2a` example, show a gate as `input-required`, be suspended, and resume when answered? | Works, forwarding to a stand-in `atomic serve` |
+
+| 3 | agentgateway as the model gateway | Can an actor reach a model through Substrate's egress gateway and agentgateway, holding no credential, with agentgateway authenticating the actor? | Works |
 
 Spike 9 (one trace per run) waits for the observability stack in the cluster;
-spikes 2 and 3 for Istio and agentgateway.
+spike 2 for Istio.
 
 Results go in [`results.md`](results.md), one section per spike, with versions,
 commands and raw output.

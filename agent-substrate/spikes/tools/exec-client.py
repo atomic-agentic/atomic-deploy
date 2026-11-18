@@ -37,6 +37,7 @@ class Session:
         if " 101 " not in status + " ":
             raise SystemExit(1)
         self.next_id = 1
+        self.streamed = {}
 
     def send(self, msg):
         ws.send_frame(self.sock, 0x1, json.dumps(msg).encode())
@@ -52,6 +53,9 @@ class Session:
             msg = json.loads(data)
             if msg.get("id") == rid:
                 return msg
+            if msg.get("method") == "process/output":
+                p = msg["params"]
+                self.streamed[p["seq"]] = base64.b64decode(p.get("chunk", ""))
             print(f"  notification: {json.dumps(msg)[:200]}")
 
 
@@ -87,6 +91,10 @@ def main():
             break
     print(f"process/read: exited={res.get('exited')} exitCode={res.get('exitCode')} "
           f"failure={res.get('failure')} after {time.monotonic() - t0:.2f} s")
+    # Output arrives as process/output notifications and as process/read
+    # chunks; both carry a seq, so merge them in order.
+    if s.streamed:
+        out = b"".join(s.streamed[k] for k in sorted(s.streamed))
     print(f"output: {out.decode('utf-8', 'replace').strip()}")
     ws.send_frame(s.sock, 0x8, b"\x03\xe8")
     return 0 if res.get("exitCode") == 0 else 2

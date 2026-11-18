@@ -5,6 +5,10 @@
   GET /sandbox          spike 5: what Codex's sandbox would find in this actor
   GET /codex            spike 5: Codex's own sandbox command, when Codex is in the image
   GET /ws               spike 4: a WebSocket echo (RFC 6455, no extensions)
+  GET /headers, POST *  reports the request: headers, JWT claims (signature redacted), body;
+                        run as a stand-in for atomic serve in spike 6
+  GET /slow?s=N         answers after N seconds (the router's request timeout)
+  GET /stream?s=N       streams a line every 5 s for N seconds (a model turn's shape)
   GET /egress?url=URL   what an outbound request from the actor gets
 
 Listens on port 80, the port Substrate's router sends to by default.
@@ -240,8 +244,58 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.reply(200, egress(target))
         elif url.path == "/ws":
             self.websocket()
+        elif url.path == "/headers":
+            self.reply(200, self.request_report())
+        elif url.path in ("/slow", "/stream"):
+            self.long_response(url)
         else:
             self.reply(404, {"error": "not found"})
+
+    def do_POST(self):
+        """Any POST: report the request, as a stand-in for atomic serve."""
+        body = self.rfile.read(int(self.headers.get("Content-Length", "0") or 0))
+        self.reply(200, self.request_report(body))
+
+    def request_report(self, body=b""):
+        headers = {}
+        claims = None
+        for key, value in self.headers.items():
+            if key.lower() == "authorization" and value.count(".") == 2:
+                # A JWT: show its claims, never the signature.
+                token = value.split(" ", 1)[-1]
+                header_b64, payload_b64, _ = token.split(".")
+                pad = lambda s: s + "=" * (-len(s) % 4)
+                claims = {"header": json.loads(base64.urlsafe_b64decode(pad(header_b64))),
+                          "payload": json.loads(base64.urlsafe_b64decode(pad(payload_b64)))}
+                value = value.split(".")[0] + ".<claims below>.<signature redacted>"
+            headers[key] = value
+        try:
+            parsed = json.loads(body) if body else None
+        except ValueError:
+            parsed = body.decode("utf-8", "replace")
+        return {"method": self.command, "path": self.path, "client": self.client_address[0],
+                "headers": headers, "jwt": claims, "body": parsed}
+
+    def long_response(self, url):
+        """/slow?s=N answers after N seconds; /stream?s=N streams a line every 5 s."""
+        import time
+        seconds = int(urllib.parse.parse_qs(url.query).get("s", ["90"])[0])
+        if url.path == "/slow":
+            time.sleep(seconds)
+            self.reply(200, {"slept": seconds})
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        start = time.monotonic()
+        while (elapsed := time.monotonic() - start) < seconds:
+            line = f"t={elapsed:.0f}s\n".encode()
+            self.wfile.write(b"%x\r\n%s\r\n" % (len(line), line))
+            self.wfile.flush()
+            time.sleep(5)
+        self.wfile.write(b"0\r\n\r\n")
+        self.close_connection = True
 
     def websocket(self):
         key = self.headers.get("Sec-WebSocket-Key")

@@ -1,0 +1,111 @@
+# Spike 3: agentgateway v1.7.0 as the model gateway. Actors reach it only
+# through Substrate's egress gateway, which swaps their placeholder
+# Authorization header for an actor JWT (audience ai-gateway). agentgateway
+# validates the JWT against Substrate's IdP, allows only actors in the spikes
+# atespace, and sends the request to Lemonade on the host with the provider
+# key from a Secret, which no actor ever sees.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: models
+---
+# Lemonade (OpenAI-compatible) runs in Docker on the host, published on
+# 13305; pods reach it on docker0.
+apiVersion: v1
+kind: Service
+metadata:
+  name: lemonade
+  namespace: models
+spec:
+  ports: [{name: http, port: 13305, targetPort: 13305}]
+---
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  name: lemonade-host
+  namespace: models
+  labels:
+    kubernetes.io/service-name: lemonade
+addressType: IPv4
+ports: [{name: http, port: 13305}]
+endpoints: [{addresses: ["172.17.0.1"]}]
+---
+# The provider key: a dummy here (Lemonade needs none), injected by agentgateway.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: lemonade-key
+  namespace: agentgateway-system
+stringData:
+  Authorization: spike-provider-key
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: ai-gateway
+  namespace: agentgateway-system
+spec:
+  gatewayClassName: agentgateway
+  listeners:
+    - name: http
+      port: 80
+      protocol: HTTP
+      allowedRoutes: {namespaces: {from: Same}}
+---
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayBackend
+metadata:
+  name: lemonade
+  namespace: agentgateway-system
+spec:
+  ai:
+    provider:
+      openai:
+        model: Qwen3.6-35B-A3B-MTP-GGUF-UD-Q4_K_XL
+      host: lemonade.models.svc.cluster.local
+      port: 13305
+      path: /api/v1/chat/completions
+  policies:
+    auth:
+      secretRef:
+        name: lemonade-key
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: lemonade
+  namespace: agentgateway-system
+spec:
+  parentRefs: [{name: ai-gateway}]
+  rules:
+    - matches: [{path: {type: PathPrefix, value: /v1/chat/completions}}]
+      backendRefs:
+        - group: agentgateway.dev
+          kind: AgentgatewayBackend
+          name: lemonade
+---
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: actor-jwt
+  namespace: agentgateway-system
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: ai-gateway
+  traffic:
+    jwtAuthentication:
+      mode: Strict
+      providers:
+        - issuer: https://idp.ate-system.svc
+          audiences: [ai-gateway]
+          # Substrate's IdP JWKS (https://idp.ate-system.svc/openid/v1/jwks),
+          # inlined for the spike; a remote JWKS needs Substrate's service CA.
+          jwks:
+            inline: '{"keys": [{"kty": "EC", "kid": "1", "use": "sig", "alg": "ES256", "crv": "P-256", "x": "QMhBI2OKpfnOJyXwNFr2jmlD1_kIM8IJvaGrLj6JH9o", "y": "lDrp4FBJbDaslvrT-Bw4SGfmaFcElMt4EjtitLrbtyk"}]}'
+    authorization:
+      action: Allow
+      policy:
+        matchExpressions:
+          - 'jwt["actor.ate.dev"].atespace == "spikes"'

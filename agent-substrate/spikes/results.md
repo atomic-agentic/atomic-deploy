@@ -17,8 +17,9 @@ is `v1.0.1` (`558e3d7`), Codex's is `rust-v0.169.0`. Manifests are in
 | 8 | Footprint | **Small.** About 660 MiB for the whole platform before any actor; 16 to 60 MiB per idle worker; nothing in memory for a suspended actor |
 | 4 | Exec-server through the router | **Works.** A WebSocket passes both router paths, resumes a suspended actor and outlives the router's 60 s request timeout; Codex's own exec-server runs commands in a gVisor actor through it. A suspend during a command closes the session and the command does not survive |
 | 5 | Codex's sandbox in gVisor | **Works with a runner template and a Codex profile made for it.** With the capabilities Substrate allows adding and a permission profile that extends `:workspace` with the network enabled, Codex 0.169's own sandbox runs in a gVisor actor: workspace writes succeed, writes to `/etc` are refused. Every mode that isolates the network fails, because gVisor cannot configure loopback in a new network namespace; network isolation is Substrate's egress policy instead |
-| 7 | Snapshot and resume | 527 MB of incompressible worktree in 20 001 files: synchronous suspend 2.2 to 2.7 s, snapshot about the worktree's size, resume 0.24 s (memory) or 0.58 s (volumes). Restores came from the node-local copy |
-| 6 | kagent bridge | **Works on kagent's side.** A bring-your-own harness on kagent's Go SDK pauses at a gate as a HITL `tool_approval_request`; kagent stores it, suspends the actor while it waits, and the answer resumes it and completes the task in 0.17 s. The harness is told the caller is `Authenticated:true` from a bare `X-User-Id` header |
+| 7 | Snapshot and resume | A shallow clone of Kubernetes (334 MB, 32 021 files) made inside the actor: synchronous suspend 1.27 s, 91 MB snapshot, restore from rustfs alone 1.10 s, `git status` clean. Incompressible data is the worst case: 527 MB suspends in 2.2 to 2.7 s, its snapshot is as large, and restores in 1.4 to 1.6 s from rustfs |
+| 6 | kagent bridge | **Works end to end with a stand-in `atomic serve`.** A bring-your-own harness on kagent's Go SDK pauses at a gate as a HITL `tool_approval_request`; kagent stores it, suspends the actor while it waits, and the answer resumes it in 0.17 to 0.27 s. The bridge forwards the decision through an egress grant, and `atomic serve` receives a Substrate actor JWT naming kagent's session. The person is only an assertion: a bare `X-User-Id` header reaches the harness as `Authenticated:true` |
+| 3 | agentgateway as the model gateway | **Works.** An actor holding only a placeholder token calls the chat API; Substrate's egress gateway injects an actor JWT, agentgateway validates it against Substrate's IdP, allows it by atespace with CEL, injects the provider key and reaches Lemonade on the host. No token or a forged token gets 401; an actor in another atespace gets 403 |
 
 ## Host preparation
 
@@ -150,9 +151,12 @@ What the router configuration in kagent's charts shows
   dataplane does not authenticate clients yet" does not apply to these charts.
 - **Only TLS listeners.** 8443 (HTTPS routes) and 8444 (`CONNECT`); the pod
   declares 8080 and 8081, but nothing listens there.
-- **A 60 s request timeout** on the actor routes, and 60 s of request parking.
-  Upstream's Envoy default is 5 minutes. An upgraded WebSocket outlives it; a
-  long plain HTTP request (a streamed model turn) has not been tried.
+- **A configured `requestTimeout: "60s"` that cuts nothing.** Requests that
+  answer only after 90 s and after 330 s, and a response streamed for 90 s,
+  all completed with 200 on both the HTTPS route and the `CONNECT` path
+  ([`images/probe`](images/probe)'s `/slow` and `/stream`). Request parking is
+  60 s. Upstream's Envoy route timeout is 5 minutes, so the ceiling depends on
+  the data plane; atomic should not rely on either.
 
 ## 5. Codex's sandbox in a gVisor actor
 
@@ -243,8 +247,69 @@ What it shows:
   client's own `X-User-Id` header becomes `User{Name: sam@example.com,
   Authenticated: true}` in the harness, with no `Authorization` header. A gate
   decision from kagent proves only that something reached kagent's gateway.
-- Not yet tried: the bridge forwarding to an `atomic serve` stand-in through
-  an egress grant, a rejection, and a gate outliving kagent's 7-day session TTL.
+Then the decision forwarded. The bridge POSTs it to `ATOMIC_URL` with
+`Authorization: Bearer kagent-placeholder`; a kagent
+[`EgressPolicy`](manifests/kagent-bridge.yaml) grants that origin with
+`authentication.actorJwt` (audience `atomic-serve`); the stand-in
+([`manifests/atomic-serve-stub.yaml`](manifests/atomic-serve-stub.yaml): the
+probe on plain runc, reporting each request) received, for a rejection:
+
+```text
+POST /v1/gates/decisions
+authorization: Bearer <ES256 JWT, kid 1>
+  iss  https://idp.ate-system.svc
+  sub  actor/kagent/session-01a1ec59-02a4-7802-a8e6-4b5dc3dec330
+  aud  ["atomic-serve"]          15-minute lifetime
+  actor.ate.dev  {atespace: kagent, actorName: session-01a1ec59-…, actorUID: 8ddb25b3-…}
+body {"gate": "gate-send-reply", "approved": false, "reason": "not today",
+      "task": "01a1ec59-03d6-…", "context": "01a1ec59-02a4-…",
+      "principal": "user={Name:sam@example.com Authenticated:true …} x-user-id=sam@example.com …"}
+```
+
+So `atomic serve` can verify that a call comes from kagent's actor for one
+session (the actor name carries kagent's context ID), with Substrate's IdP as
+the issuer, and nothing secret ever enters the actor. Who decided is still
+only what kagent was told.
+
+Not tried: a gate outliving kagent's 7-day session TTL.
+
+## 3. agentgateway as the model gateway
+
+agentgateway v1.7.0 on its own controller (`agentgateway-crds` and
+`agentgateway` charts), with [`manifests/ai-gateway.yaml`](manifests/ai-gateway.yaml):
+a Gateway `ai-gateway`, an `AgentgatewayBackend` for Lemonade on the host
+(OpenAI-compatible, through a selectorless `models/lemonade` Service on
+docker0) holding the provider key from a Secret, an HTTPRoute, and an
+`AgentgatewayPolicy` with JWT authentication (issuer
+`https://idp.ate-system.svc`, audience `ai-gateway`, Substrate's JWKS inline)
+and CEL authorization `jwt["actor.ate.dev"].atespace == "spikes"`.
+
+The actor's [egress policy](manifests/worktree-git-egress.yaml) has an `http`
+rule for `ai-gateway.agentgateway-system.svc.cluster.local:80` that replaces
+`Authorization` with an actor JWT for audience `ai-gateway`.
+
+| Caller | Credential sent | Result |
+| --- | --- | --- |
+| `wt-git` actor (atespace `spikes`), from inside the actor | `Bearer placeholder` | 200 in 12.8 s; model replaced by the backend's (`Qwen3.6-35B-A3B-MTP-GGUF-UD-Q4_K_XL`); usage 16 in, 20 out |
+| `other-1` actor (atespace `spikes-other`), same egress policy | `Bearer placeholder` | 403 `authorization failed` |
+| A pod outside Substrate | none | 401 `authentication failed` |
+| A pod outside Substrate | a forged ES256 JWT with the right issuer, audience and claims | 401 `authentication failed` |
+
+agentgateway's metrics on 15020 carried it: `agentgateway_gen_ai_client_token_usage_sum`
+by token type and model (16 input, 20 output) and `agentgateway_requests_total`
+with `status="401", reason="JwtAuth"`. Prompts and replies were not in them.
+
+Notes:
+
+- The JWKS is inlined, so a key rotation in Substrate's IdP would break it. A
+  remote JWKS (`https://idp.ate-system.svc/openid/v1/jwks`) needs agentgateway
+  to trust Substrate's servicedns CA through a backend with TLS.
+- The hop from Substrate's egress gateway to agentgateway is plain HTTP inside
+  the cluster; Substrate's egress trusts only public CAs for `https` rules.
+  That hop is what spike 2 (ambient) is meant to cover.
+- Substrate never suspends an idle actor by itself: the `spikes-other`
+  template's golden build waited, without an error, until two running actors
+  that filled both workers were suspended, then finished in 3 s.
 
 ## 7. Snapshot and resume
 
@@ -262,14 +327,35 @@ bytes (527 MB, incompressible: a worst case).
 | After resume | 527 MB, 20 001 files | 527 MB |
 | Snapshot in rustfs | 524 MB | 530 MB |
 
-Snapshots are not deduplicated against earlier ones in what was measured, and
-random data does not compress, so a snapshot costs about the worktree's size.
-Both resumes came from the node-local copy; restoring from rustfs alone, as on
-another node, is not measured on one node.
+Then a realistic worktree ([`manifests/worktree-git-template.yaml`](manifests/worktree-git-template.yaml),
+volumes fidelity): a shallow clone of `kubernetes/kubernetes` made inside the
+actor through an [egress policy](manifests/worktree-git-egress.yaml) that
+allows only `github.com:443` as TLS passthrough (a host outside it did not
+resolve; github.com returned 200).
+
+| Measure | Value |
+| --- | --- |
+| `git clone --depth 1` in the actor | 16.4 s |
+| Worktree | 334 MB, of which `.git` 52 MB; 32 021 files |
+| `suspend --mode=sync` | 1.27 s |
+| Snapshot in rustfs | 91 MB (source compresses) |
+| First request after the local copy was dropped (restore from rustfs) | 1.10 s |
+| After restore | 334 MB, 32 021 files, `git status` clean; the first `git status` 2.2 s against 0.45 s before |
+
+Restore from rustfs alone, for the random worktree too, with `atelet`'s
+`--snapshot-upload-delay=30s --snapshot-detach-delay=90s`
+([`kagent/atelet-values.yaml`](kagent/atelet-values.yaml), spike-only; the
+defaults are 5 and 30 minutes): the local copy was dropped 90 s after the
+suspend, then the first request took 1.61 s (memory fidelity) and 1.37 s
+(volumes), with all 527 MB back.
 
 ## State left on the cluster
 
-- Atespaces `ate-demo-counter`, `ate-demo-counter-microvm` and `spikes`, with
+- agentgateway v1.7.0 in `agentgateway-system` with the `ai-gateway` Gateway,
+  the `models` namespace pointing at Lemonade, and the `atomic` namespace with
+  the `atomic-serve` stand-in.
+- Atespaces `ate-demo-counter`, `ate-demo-counter-microvm`, `spikes` and
+  `spikes-other`, with
   their templates and actors, all suspended; kagent's `atomic-bridge-spike`
   Harness and Agent and one suspended session.
 - WorkerPools `counter` (two gVisor workers) and `counter-microvm` (one), the

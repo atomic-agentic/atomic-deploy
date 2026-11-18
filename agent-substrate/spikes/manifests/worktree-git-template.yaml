@@ -1,0 +1,28 @@
+# Spike 7: a real git clone in the actor's durable directory, snapshotted at
+# SNAPSHOT_FIDELITY_VOLUMES (kagent's), with an egress policy for github.com.
+metadata:
+  atespace: spikes
+  name: worktree-git
+workerSelector:
+  matchLabels:
+    workload: counter
+containers:
+  - name: exec-server
+    image: localhost:5000/substrate-exec-server@sha256:563727c5709d5df61af07b57c9020421640c6a42551bdafd07c2e22b826e2352
+    wakeupProbe:
+      httpGet:
+        path: /readyz
+        port: 80
+    volumeMounts:
+      - name: work
+        mountPath: /work
+resources:
+  limits:
+    cpuMillicores: 1000
+    memoryBytes: 536870912
+snapshotConfig:
+  preferredFidelity: SNAPSHOT_FIDELITY_VOLUMES
+  storageLocation: s3://ate-snapshots/spikes
+volumes:
+  - name: work
+    durableDir: {}
