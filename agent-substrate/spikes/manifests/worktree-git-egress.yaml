@@ -18,3 +18,7 @@ rules:
             actorJwt:
               audiences: ["ai-gateway"]
               expirationSeconds: 900
+  # The atomic serve stand-in, for the pooled-connection experiments.
+  - http:
+      hostnames: ["atomic-serve.atomic.svc.cluster.local"]
+      ports: {numbers: [80]}

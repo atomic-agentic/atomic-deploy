@@ -316,6 +316,109 @@ What it shows:
   mesh integration (`istio.enabled`, HBONE in the proxy) was not needed for
   L4 mTLS and was not tried.
 
+## Three findings, examined
+
+Three results from the spikes above mattered enough to the design to chase to
+their cause. Each was rerun on its own, with the source of the component
+responsible read at the version installed.
+
+### Pooled connections and mesh policy
+
+In spike 2's T2, strict mTLS in `atomic` at first let Substrate's plaintext
+egress hop through. Two experiments, with an actor posting to the stand-in
+every 15 s ([`tools/egress-loop.py`](tools/egress-loop.py) through
+exec-server), a policy change at about 62 s, and a 100 s pause near the end:
+
+| | E1b: egress gateway in the mesh, revoke its identity in the AuthorizationPolicy | E1a: egress gateway outside the mesh, `atomic` PERMISSIVE → STRICT |
+| --- | --- | --- |
+| 0 to 60 s | 200 | 200 |
+| After the change | **503 from the next request (75 s) on** | **200 for every request through 165 s** |
+| After the 100 s pause | 503 | 503 |
+| ztunnel | closed the pooled connection at the instant of the change: `connection closed due to policy change` (it had been open 62 s) | logged the pooled connection's end only when it closed, 265 s after it opened |
+
+Why:
+
+- **Substrate's egress gateway pools upstream connections** on agentgateway's
+  defaults: `pool_idle_timeout` 90 s and no limit on idle connections
+  (`crates/agentgateway/src/lib.rs` at v1.7.0); its configuration sets no pool
+  options. The router, by contrast, sets `poolMaxSize: 0` and keeps none.
+- **ztunnel re-evaluates authorization on open connections** when an
+  AuthorizationPolicy changes, but in Istio 1.32.0 it did not close a
+  plaintext connection admitted while the namespace was PERMISSIVE when
+  PeerAuthentication turned STRICT.
+
+So a stale admission is limited to plaintext from outside the mesh, and it
+lasts as long as the egress gateway keeps the connection busy at least every
+90 s: indefinitely on a busy path, 90 s on an idle one. With the egress gateway
+enrolled (decision 4), revocation is immediate. What follows for the
+deployment:
+
+- Enroll `atenet-egress` and apply strict mTLS before the first actor traffic,
+  not after; if a mesh policy is tightened while plaintext is in use, restart
+  `atenet-egress`.
+- `atomic serve` checks the actor JWT on every request, so its own
+  authorization never depends on how old a connection is.
+
+### Idle actors and capacity
+
+`spikes-other`'s golden build in spike 3 waited until running actors were
+suspended. What Substrate 1.0 does:
+
+- **No idle suspend.** The API has a worker-proposed suspend
+  (`WorkerService.RequestActorSuspend`, "only the Worker can observe what makes
+  an Actor worth reclaiming"), and `atelet` forwards it, but nothing produces
+  the signal: `internal/ateworker/suspend` has no importers at `3d574499`. The
+  architecture doc leaves suspend to "the user (or the higher-level system)".
+  kagent suspends its own session actors at each pause.
+- **No eviction.** E2a: with both counter workers held by idle running
+  actors, a request to a suspended actor parked for the router's budget and
+  failed: `503 no worker has room for the actor` after 60.0 s (kagent's charts
+  set the budget to 60 s; upstream's default is 5 s). Neither idle actor was
+  touched.
+- **Golden builds fail out of sight.** E2b: a template created while the
+  workers were full showed no golden tag, no error and an empty `status`
+  through the API; `ate-api-server`'s log had `Failed to reconcile actor
+  template, requeueing … AssignWorker: no worker has room for the actor`, 20
+  times in 3 minutes. Freed, it was ready in 10 s.
+
+What follows for atomic: every actor it resumes it also suspends (after each
+step, synchronously before a gate, on an idle timer, and at start-up for any
+actor in its atespaces that no live attempt owns, since a crashed control
+plane leaves its actors running); `503 no worker has room` is a placement
+failure to retry with backoff, not an attempt failure; and a template counts
+as ready only when its golden tag appears, within a deadline atomic sets.
+
+### Request timeouts through the router
+
+Requests of 90 s and 330 s completed through the router although its
+configuration says `requestTimeout: "60s"`. Why, and what does end a long
+request:
+
+- **That timeout is not on actor traffic.** It sits in the route's
+  `substrateIngress` policy, whose `policies` apply to the "Backend that
+  receives ResumeActor calls" (`crates/agentgateway/src/http/substrate/ingress.rs`
+  at v1.7.0): it bounds the router's call to Substrate's API to resume the
+  actor. The actor route sets no timeout, and agentgateway applies none by
+  default.
+- **The data planes differ.** Upstream's Envoy router has a 5-minute default
+  route timeout (`--route-timeout`, `cmd/atenet/internal/router/xds.go`);
+  kagent's charts, on agentgateway, have no ceiling.
+- **A router restart ends them.** E3a: with two 120 s requests in flight, the
+  router was restarted 20 s in. About 6 s later
+  (`drain duration expired with pending connections, forcefully shutting
+  down`), both ended: the silent one with `RemoteDisconnected`, the streamed
+  one after 6 of 24 lines. Read as raw chunked data the stream raised
+  `IncompleteRead`; read line by line, as streaming clients commonly do, it
+  looked like a normal end with status 200.
+
+What follows for atomic: no attempt depends on one long request. Starting an
+attempt is short and returns an ID; progress comes by polling or by a stream
+whose events carry sequence numbers and an explicit final event, so a cut is
+detected and the client reconnects from the last event; every attempt has a
+deadline atomic enforces itself. An exec-server WebSocket is presumably cut by
+a router restart in the same way (not tested), which gap 5 already treats as a
+failed attempt.
+
 ## 3. agentgateway as the model gateway
 
 agentgateway v1.7.0 on its own controller (`agentgateway-crds` and
