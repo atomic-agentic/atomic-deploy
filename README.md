@@ -14,6 +14,7 @@ deployment depends on something atomic does not do yet, its README says so.
 | Directory | What it runs | Status |
 | --- | --- | --- |
 | [`docker-compose/`](docker-compose) | atomic on one host, on Postgres, with the observability stack | Stack and dashboards checked with sample telemetry; the atomic image runs a Codex turn. atomic's `serve` and Postgres storage are pending |
+| [`agent-substrate/`](agent-substrate) | atomic on single-node k3s: `atomic serve` on Postgres, atoms that run code in Agent Substrate actors under gVisor, kagent 1.0 conversations through a bridge harness, agentgateway holding every model and tool credential, Istio ambient for the trusted services | Design only and forward-looking, assuming atomic 1.0; records what the Substrate and kagent 1.0 releases change in atomic's plan and the gaps in atomic they expose |
 
 ## Shared parts
 
