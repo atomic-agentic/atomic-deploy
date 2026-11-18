@@ -113,7 +113,10 @@ def subset(want, have):
 sys.exit(0 if subset(yaml.safe_load(open(sys.argv[1])), json.load(sys.stdin)) else 1)' "$2"
 }
 if ! helm status kagent -n kagent >/dev/null 2>&1; then
-    (cd values && kagent --config kagent.yaml install --profile minimal)
+    # kagent install refuses to run without its default provider's key. It goes
+    # into kagent's default ModelConfig, which the bridge, a bring-your-own
+    # harness, never uses.
+    (cd values && OPENAI_API_KEY=${OPENAI_API_KEY:-unused} kagent --config kagent.yaml install --profile minimal)
 else
     echo "kagent is installed; checking Substrate's values"
     for r in "substrate values/substrate.yaml" "substrate-atelet values/atelet.yaml"; do

@@ -654,21 +654,10 @@ suspend, then the first request took 1.61 s (memory fidelity) and 1.37 s
 
 ## State the spikes left on the cluster
 
-The deployment's `up.sh` was first run over this state, on 2026-11-18, and
-left it in place beside its own `atomic` atespace and `runners` pool:
-
-- Istio 1.32.0 ambient in `istio-system`; `atomic` and `agentgateway-system`
-  enrolled and strict; `atenet-egress` patched with the ambient pod label, and
-  the `ambient-probes` NetworkPolicy in `ate-system`. `up.sh` makes the same.
-- agentgateway v1.7.0 in `agentgateway-system` with the `ai-gateway` Gateway,
-  the `models` namespace pointing at Lemonade, and the `atomic` namespace with
-  the `atomic-serve` stand-in. `up.sh` makes the same, with its own images.
-- Spike-only, to be removed: atespaces `ate-demo-counter`,
-  `ate-demo-counter-microvm`, `spikes` and `spikes-other`, with their
-  templates and actors, all suspended; kagent's `atomic-bridge-spike` Harness
-  and Agent and their suspended sessions; WorkerPools `counter` (two gVisor
-  workers) and `counter-microvm` (one), the `microvm` SandboxConfig and its
-  assets in rustfs; in `ate-system`, the `router-client` pod and the
-  `ws-client` ConfigMap; on the host, the `substrate-spike-registry`
-  container, which `up.sh` also uses as its registry.
-- errai's containers are stopped; `lemonade-server` kept running throughout.
+Removed on 2026-11-18 by the deployment's `down.sh`, which uninstalled kagent
+and Substrate with every atespace, actor, WorkerPool and snapshot, Istio and
+agentgateway; `up.sh` then installed the deployment on the clean cluster and
+`check.sh` passed. Still there from the spikes: the empty `ate-demo-counter`
+and `ate-demo-counter-microvm` namespaces, and on the host the
+`substrate-spike-registry` container, which `up.sh` uses as its registry.
+errai's containers are stopped; `lemonade-server` kept running throughout.

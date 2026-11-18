@@ -380,11 +380,12 @@ cp .env.example .env                 # optional: the model server, atespace, wor
 ```
 
 `up.sh` runs as you and is safe to run again: unchanged images build to the
-same digest, and Substrate is upgraded only when its values differ. Over an
-existing install it took 2.5 minutes here; a first install also pulls every
-image (kagent's install alone took about 8 minutes in the spikes).
-`./down.sh` removes everything `up.sh` installed and leaves k3s; it has not
-been run yet.
+same digest, and Substrate is upgraded only when its values differ.
+`./down.sh` removes everything `up.sh` installed and leaves k3s (and Istio's
+CRDs, which its chart keeps). Here, `down.sh` took 2 minutes, a reinstall
+from there 3 minutes with every image already pulled, and `check.sh` 1
+minute; a first install also pulls the images (kagent's install alone took
+about 8 minutes in the spikes).
 
 | Step | What `up.sh` does |
 | --- | --- |
