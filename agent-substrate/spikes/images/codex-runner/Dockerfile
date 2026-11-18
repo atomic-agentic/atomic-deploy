@@ -12,3 +12,6 @@
 FROM exec
 COPY --from=codex /usr/local/bin/codex /usr/local/bin/codex
 RUN ln -sf /opt/probe/bwrap /usr/local/bin/bwrap
+# Codex's state on the actor's durable directory: a volumes-only suspend loses
+# the root filesystem (spike 10). The runner's quiescence report checks it.
+ENV CODEX_HOME=/work/codex-home
