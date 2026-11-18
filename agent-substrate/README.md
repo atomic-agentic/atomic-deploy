@@ -76,14 +76,16 @@ open points, and change some:
    atespaces and access policies live in Substrate's Postgres behind the
    `substrate.ateapi.v1.Control` gRPC service, so atomic must create them
    through the API; Helm or GitOps cannot declare them (gap 2).
-3. **"Execution only in the actor" is in doubt.** At atomic's pinned Codex
-   (`rust-v0.169.0`), exec-server's remote transport is JSON-RPC over
-   WebSocket, with stdio and an outbound Noise relay as the alternatives.
-   Substrate's router carries "only HTTP(S) traffic over the tunnel" (raw TCP
-   not yet), and its egress gateway blocks WebSocket, so the relay cannot
-   leave an actor. Whether the router passes an inbound WebSocket upgrade is
-   undocumented. Harness mode, the plan's second placement, goes first here
-   (decision 7, gap 5).
+3. **"Execution only in the actor" survives the transport question.** At
+   atomic's pinned Codex (`rust-v0.169.0`), exec-server's remote transport is
+   JSON-RPC over WebSocket, with stdio and an outbound Noise relay as the
+   alternatives. Substrate's docs say the router carries "only HTTP(S)
+   traffic over the tunnel", and its egress gateway blocks WebSocket, so the
+   relay cannot leave an actor. But an inbound WebSocket reaches an actor
+   through both router paths, resumes a suspended one, and outlives the
+   router's 60 s request timeout ([spike 4](spikes/results.md#4-websocket-through-the-router)).
+   Codex's own exec-server through it is the remaining check (decision 7,
+   gap 5).
 4. **No SPIRE.** SPIFFE identities come from Kubernetes pod certificates
    (`PodCertificateRequest`, issued by Substrate's `podcertcontroller`).
    Actor X.509 identities are
@@ -275,11 +277,13 @@ sequenceDiagram
    kagent requires Substrate 1.0 and pins the `kagent-dev` fork, whose charts
    (`substrate-crds`, `substrate-podcert`, `substrate-atelet`, `substrate`)
    choose agentgateway for the router and egress. Upstream's `ate-setup`
-   stays the reference for what the charts leave out. Two upstream caveats
-   apply: Substrate's agentgateway router "does not authenticate ingress
-   clients yet", so NetworkPolicy alone decides who reaches the router (only
-   `atomic` and `kagent`); and `ate-setup` says a credential provider requires
-   the Envoy data plane while its docs say either works (spike 3).
+   stays the reference for what the charts leave out. Upstream warns that its
+   agentgateway router "does not authenticate ingress clients yet"; the
+   router in kagent's charts does, with a CEL rule on the client's SPIFFE ID,
+   and listens only on TLS ports ([spike 4](spikes/results.md#4-websocket-through-the-router)).
+   `atomic serve`'s service account joins that allowlist. One caveat remains:
+   `ate-setup` says a credential provider requires the Envoy data plane while
+   its docs say either works (spike 3).
 3. **No host-level gVisor RuntimeClass at first.** Substrate's worker pods are
    unprivileged runc pods (root, nine capabilities including `SYS_ADMIN` and
    `NET_ADMIN`, seccomp and AppArmor unconfined) that run `runsc` themselves,
@@ -318,10 +322,12 @@ sequenceDiagram
    agents; Substrate owns sandboxes. atomic drives Substrate directly for its
    runners. kagent reaches atomic only through the bridge harness and
    atomic's A2A server, and atomic reaches kagent only as an A2A client.
-7. **Harness mode first.** An `agent` actor runs `atomic runner` with Codex
-   for the whole attempt. Execution-only placement (Codex in `atomic serve`,
-   exec-server in the actor) follows only if spike 4 shows a WebSocket session
-   through the router.
+7. **Both placements stay open.** Harness mode (an `agent` actor runs
+   `atomic runner` with Codex for the whole attempt) is the simpler first
+   build. Execution-only placement (Codex in `atomic serve`, exec-server in
+   the actor) keeps model traffic and Codex's thread out of the actor, and
+   spike 4 shows its WebSocket transport works through the router; it waits on
+   Codex's exec-server itself passing the same test.
 8. **One Postgres, three databases and roles.** `substrate_owner` and
    `substrate_readwrite` for Substrate, one role for kagent, atomic's roles
    from the Compose deployment. One rustfs with a bucket for Substrate
@@ -393,16 +399,16 @@ another form, and are marked so: one design should serve both.
 | --- | --- | --- | --- | --- |
 | 1 | **Blocking.** `atomic serve` as a Kubernetes workload | The control plane is a Deployment; Kubernetes needs probes, and pods get new names on every rollout | `atomic serve` and `atomic runner` as separate processes; liveness, readiness (database reachable, migrations current, recovery done) and graceful SIGTERM; executor identity from configuration, not the pod name (AWS gaps 3 and 4) | M24 (`atomic-a6bh`, `atomic-exnm`), M18 (`atomic-ctd6.1`), M19 (`atomic-na07`) |
 | 2 | **Blocking.** A Substrate API client | Templates, actors, egress policies and atespaces exist only behind `substrate.ateapi.v1.Control`; nothing declarative creates them | A Rust gRPC client from `ateapi.proto`; authentication with a projected pod certificate whose SPIFFE ID the API and router allow; authorization through Substrate's OpenFGA on the atespaces atomic owns; idempotent reconciliation at start, so templates and policies follow atom definitions | M25 (`atomic-33yo`) |
-| 3 | **Blocking.** One attempt contract over HTTP, for Substrate and Lambda | The router carries HTTP(S) only, routes by the `ate-target-actor` header, parks requests only briefly while an actor resumes (5 s by default; kagent's charts set 60 s), and an actor can be suspended between calls | The runner serves HTTP on port 80 with a readiness probe; starting an attempt is a short request (pinned definition hashes, inputs as artifact references, epoch, deadline); progress and results survive a reconnect; exit classes as typed errors. The same contract as the AWS design's gap 5, with HTTP transport here and Lambda invoke there | M24 (`atomic-xaay`), M25 (`atomic-7y96`) |
+| 3 | **Blocking.** One attempt contract over HTTP, for Substrate and Lambda | The router routes by the `ate-target-actor` header, parks requests only briefly while an actor resumes (5 s by default; kagent's charts set 60 s), times out an HTTP request after 60 s in kagent's charts (5 min with upstream's Envoy), and an actor can be suspended between calls | The runner serves HTTP on port 80 with a readiness probe; starting an attempt is a short request (pinned definition hashes, inputs as artifact references, epoch, deadline); progress and results survive a reconnect; exit classes as typed errors. The same contract as the AWS design's gap 5, with HTTP transport here and Lambda invoke there | M24 (`atomic-xaay`), M25 (`atomic-7y96`) |
 | 4 | **Blocking.** Placement by what an atom does | Only actors sandbox; `atomic serve` must never fall back to running code in-process | The AWS design's gap 1, plus what Substrate cannot do: `atomic check` refuses an atom whose declarations cannot become an egress policy, and reports each atom's placement | M23 (`atomic-xi0`), M24 |
-| 5 | Execution-only placement through the router | Codex's exec-server speaks JSON-RPC over WebSocket (or stdio, or an outbound Noise relay); the egress gateway blocks WebSocket and the router documents HTTP(S) only | The spike's answer. If a WebSocket upgrade passes the router, a `substrate` remote environment; if not, harness mode is the only Substrate placement, and the plan's default and its "Codex threads stay in the control plane" property change for Substrate | `atomic-2h8u` |
+| 5 | Execution-only placement through the router | Codex's exec-server speaks JSON-RPC over WebSocket (or stdio, or an outbound Noise relay); the egress gateway blocks WebSocket, so only inbound sessions can work | A `substrate` remote environment that dials exec-server in the actor through the router's HTTPS route or a `CONNECT` tunnel, with the router's client certificate, and reconnects across a suspend. Spike 4 shows a WebSocket passes both paths; Codex's exec-server itself is the remaining check | `atomic-2h8u` |
 | 6 | **Blocking.** Egress policy from atom declarations | Actors are default-deny: DNS answers NXDOMAIN outside the policy, rules match host names (wildcard only in the leftmost label) and ports, literal IPs, UDP, WebSocket and forward-proxy `CONNECT` are refused | Compile `network` and `tools` to `http`, `https` or `tls_passthrough` rules; always add the model gateway, rustfs and the telemetry collector; reject in `atomic check` what cannot compile; and since `https` rules are intercepted, runner images trust Substrate's `egress-mitm.ate.dev` bundle for git, Node, Deno, uv and pip | M25 (`atomic-nfxt`) |
 | 7 | Credentials as placeholders | Substrate's egress gateway injects a credential only into a header the actor sends with a placeholder value; real secrets never enter the actor | Secrets that atomic references rather than reads: entries that compile to `ate-secret://k8s.io/default/<ns>/<secret>/<key>` header rules and the matching `namespacePolicies`; runner configuration that sends placeholders (Codex's provider header, a git credential helper); `atomic-xi0.1` so nothing else leaks into atom commands | M29a (`atomic-r6p0`), M23 (`atomic-xi0.1`), M29b (`atomic-7ab8`) |
 | 8 | The per-request model check outside atomic's process | In harness mode, Codex in the actor calls agentgateway directly; M56 puts one policy check before every provider request inside atomic | Either a policy-decision endpoint in `atomic serve` that agentgateway's `extAuth` calls, keyed by the actor's identity, so the check stays atomic's; or model calls routed back through `atomic serve` (the AWS design's gateway listener, gap 6 there). The first keeps credentials and telemetry in agentgateway; the second keeps one path for both deployments | M56 (`atomic-p086`, `atomic-6uze`) |
 | 9 | Runs mapped to actor identities | Requests from actors arrive with Substrate identities (`actor/<atespace>/<name>` JWTs, SPIFFE `worker-for-actor/…` certificates), never with anything atomic issued | Deterministic actor names from run, step and attempt; atomic's endpoints and agentgateway's policy authorize by that name against the current attempt and ownership epoch, so a stale attempt's actor is refused | M25 (`atomic-u4lw`), M19 (`atomic-7x6f`) |
 | 10 | Suspend, owned by atomic, and what survives it | Substrate suspends only when asked; memory snapshots are asynchronous by default and pinned to the runtime version; kagent uses volumes only | Suspend after each step, synchronously before a gate or a long wait, and on an idle timer; the worktree and Codex's state database in the actor's DurableDir or the artifact store; the commit pushed before the checkpoint; memory snapshots as an optimisation only | M25 (`atomic-maws`, `atomic-oqqp`, `atomic-klse`), `atomic-oqff` |
 | 11 | Clean attempts in reused actors | A `code` actor serves many executions | Revert to the template's golden snapshot (Substrate's `RevertActor`) before each execution, or one actor per execution, chosen by measurement; refuse work for another tenant's atespace. Replaces the scrubbing of the AWS design's gap 8 | M24, M29 |
-| 12 | Codex with its sandbox off, by policy | gVisor supports no ambient capabilities, and Substrate's admission refuses `SYS_ADMIN` for actor containers, so bubblewrap is unlikely to start | The AWS design's gap 7: a managed-requirements mode that turns Codex's sandbox off because the backend reports an outer boundary, with the trust change documented | `atomic-k0dx`, `atomic-hfve.1` |
+| 12 | Codex's sandbox inside an actor | In a gVisor actor, bwrap needs `SETUID`, `SETGID` and the other capabilities Substrate allows a template to add, and even then cannot create a network namespace (gVisor cannot configure its loopback); Landlock is not implemented. Every Codex 0.169 mode that isolates the network fails, and only `:danger-full-access` runs ([spike 5](spikes/results.md#5-codexs-sandbox-in-a-gvisor-actor)) | A runner template with those capabilities and Codex's network policy enabled, so Codex keeps its filesystem sandbox and seccomp while Substrate's egress policy does the network isolation; or, failing that, the AWS design's gap 7: Codex's sandbox off by managed requirement because the backend reports an outer boundary. Either way the trust change is stated: commands share the harness's egress, including what the egress gateway injects | `atomic-k0dx`, `atomic-hfve.1` |
 | 13 | **Blocking for M26.** A bridge harness for kagent | kagent runs harnesses inside actors with a private contract: A2A over gRPC on port 80, `/readyz` on 8081, `KAGENT_BOOTSTRAP_JSON` and `BootstrapService`, tasks persisted through `TaskStoreService`, one execution per actor, image pinned by digest, at most 32 environment variables | A small harness that maps a kagent session to an atomic workflow run through atomic's A2A server (M22) and keeps no state of its own beyond kagent's task store; written with kagent's Go SDK (`go/adk/pkg/app`), since there is no Rust one, and kept out of atomic's own A2A server, as the plan asks. `atomic-zf2y`'s question is answered by this table row | M26 (`atomic-zf2y`, `atomic-2pkv`, `atomic-rs8m`) |
 | 14 | Gates in kagent, and who decided | kagent's human-in-the-loop is an A2A extension (`https://kagent.dev/extensions/hitl/v1`: `input-required` with `ask_user_request` or `tool_approval_request`); the actor receives only `X-User-Id`, an opaque principal; kagent's default auth mode trusts that header, its OIDC mode relies on oauth2-proxy without verifying the token itself, and its authorizer is a no-op; sessions expire after 7 idle days | Gate policies that state which channels may decide and at what assurance; a kagent decision recorded as "kagent, for principal X", never as a verified person; gates that may wait longer than kagent's session TTL resumable from atomic's side | M22 (`atomic-jtqr`), M27 (`atomic-nzbm`) |
 | 15 | kagent agents as `kind: a2a` atoms | kagent's public A2A gateway (`POST /agents/{namespace}/{name}` on 8083) requires `A2A-Version: 1.0` and authenticates service accounts by TokenReview with audience `kagent-invocation`; a busy agent refuses with `KAGENT_SEND_NOT_ACCEPTED` and `retryAfterMs` | An `auth` kind for a projected service-account token with a stated audience; the refusal mapped to a retry that the effect ledger records as not sent | M22 (`atomic-zgmi`, `atomic-8mrf`) |

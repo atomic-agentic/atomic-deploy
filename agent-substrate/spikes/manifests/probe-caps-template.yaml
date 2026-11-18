@@ -1,0 +1,26 @@
+# The probe with every capability Substrate allows (spike 5's variant).
+metadata:
+  atespace: spikes
+  name: probe-caps
+workerSelector:
+  matchLabels:
+    workload: counter
+containers:
+  - name: probe
+    image: localhost:5000/substrate-probe@sha256:6585118d27b252ee37f742497cfd8866b7dac2adb5d06502e940efa05c2ef102
+    securityContext:
+      capabilities:
+        # Every capability Substrate's admission allows adding.
+        add: [AUDIT_WRITE, CHOWN, DAC_OVERRIDE, FOWNER, FSETID, KILL, NET_BIND_SERVICE,
+              SETFCAP, SETGID, SETPCAP, SETUID, SYS_CHROOT]
+    wakeupProbe:
+      httpGet:
+        path: /readyz
+        port: 80
+resources:
+  limits:
+    cpuMillicores: 500
+    memoryBytes: 268435456
+snapshotConfig:
+  preferredFidelity: SNAPSHOT_FIDELITY_MEMORY
+  storageLocation: s3://ate-snapshots/spikes

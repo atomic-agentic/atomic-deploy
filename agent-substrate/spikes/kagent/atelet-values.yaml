@@ -1,0 +1,6 @@
+# atelet pulls actor images from inside its pod, where localhost is the pod.
+# Images named localhost:5000/... come from the registry on docker0 instead,
+# as Substrate's kind setup does with its kind-registry container.
+atelet:
+  extraArgs:
+    - --localhost-registry-replacement=172.17.0.1:5000

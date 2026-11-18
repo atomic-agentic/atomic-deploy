@@ -1,0 +1,21 @@
+# ActorTemplate for the probe actor (spikes 4 and 5), on the counter pool.
+metadata:
+  atespace: spikes
+  name: probe
+workerSelector:
+  matchLabels:
+    workload: counter
+containers:
+  - name: probe
+    image: localhost:5000/substrate-probe@sha256:6585118d27b252ee37f742497cfd8866b7dac2adb5d06502e940efa05c2ef102
+    wakeupProbe:
+      httpGet:
+        path: /readyz
+        port: 80
+resources:
+  limits:
+    cpuMillicores: 500
+    memoryBytes: 268435456
+snapshotConfig:
+  preferredFidelity: SNAPSHOT_FIDELITY_MEMORY
+  storageLocation: s3://ate-snapshots/spikes

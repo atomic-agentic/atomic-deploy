@@ -5,3 +5,4 @@
 
 # Release archives staged for an image build.
 docker-compose/atomic/dist/
+__pycache__/
