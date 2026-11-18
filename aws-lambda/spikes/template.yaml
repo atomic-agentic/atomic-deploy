@@ -1,0 +1,530 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Throwaway spikes for ../README.md, in their own VPC. Deploy, run run.sh,
+# record the results, delete the stack. Nothing here is part of the design.
+#
+#   1  Codex's sandbox: user namespaces, Landlock and Codex's own bwrap, on
+#      Lambda (SandboxProbe) and on Fargate (SandboxTask).
+#   2  Lambda environment reuse: what survives between invocations and after
+#      a crash (EnvReuse).
+#   6  Bedrock from a subnet with no internet route, through PrivateLink, and
+#      which IAM permissions Mantle and Runtime check (Bedrock*).
+#   8  OTLP export to CloudWatch from that subnet through VPC endpoints,
+#      signed with SigV4 by the function's role (OtlpProbe).
+AWSTemplateFormatVersion: "2010-09-09"
+Description: atomic AWS spikes (temporary; delete after use)
+
+Parameters:
+  VpcCidr:
+    Type: String
+    Default: 10.77.0.0/16
+
+Resources:
+  # --- Network: one public subnet (Fargate task with a public IP), one
+  # isolated subnet with no route out (Lambda probes), and endpoints.
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags: [{ Key: Name, Value: atomic-spikes }]
+  Igw:
+    Type: AWS::EC2::InternetGateway
+  IgwAttach:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties: { VpcId: !Ref Vpc, InternetGatewayId: !Ref Igw }
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Select [0, !Cidr [!Ref VpcCidr, 4, 8]]
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Tags: [{ Key: Name, Value: atomic-spikes-public }]
+  PublicRoutes:
+    Type: AWS::EC2::RouteTable
+    Properties: { VpcId: !Ref Vpc }
+  PublicDefault:
+    Type: AWS::EC2::Route
+    DependsOn: IgwAttach
+    Properties: { RouteTableId: !Ref PublicRoutes, DestinationCidrBlock: 0.0.0.0/0, GatewayId: !Ref Igw }
+  PublicAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref PublicSubnet, RouteTableId: !Ref PublicRoutes }
+  IsolatedSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Select [1, !Cidr [!Ref VpcCidr, 4, 8]]
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Tags: [{ Key: Name, Value: atomic-spikes-isolated }]
+  IsolatedRoutes:
+    Type: AWS::EC2::RouteTable
+    Properties: { VpcId: !Ref Vpc }
+  IsolatedAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref IsolatedSubnet, RouteTableId: !Ref IsolatedRoutes }
+
+  EndpointSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: HTTPS from inside the spike VPC to interface endpoints
+      VpcId: !Ref Vpc
+      SecurityGroupIngress: [{ IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: !Ref VpcCidr }]
+  ProbeSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Spike probes, egress only
+      VpcId: !Ref Vpc
+      SecurityGroupEgress: [{ IpProtocol: "-1", CidrIp: 0.0.0.0/0 }]
+
+  LogsEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.logs
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref IsolatedSubnet]
+      SecurityGroupIds: [!Ref EndpointSg]
+  MonitoringEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.monitoring
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref IsolatedSubnet]
+      SecurityGroupIds: [!Ref EndpointSg]
+  XrayEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.xray
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref IsolatedSubnet]
+      SecurityGroupIds: [!Ref EndpointSg]
+  MantleEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.bedrock-mantle
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref IsolatedSubnet]
+      SecurityGroupIds: [!Ref EndpointSg]
+  BedrockRuntimeEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.bedrock-runtime
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref IsolatedSubnet]
+      SecurityGroupIds: [!Ref EndpointSg]
+
+  # --- Roles
+  BasicRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement: [{ Effect: Allow, Principal: { Service: lambda.amazonaws.com }, Action: sts:AssumeRole }]
+      ManagedPolicyArns: [arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole]
+  OtlpRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement: [{ Effect: Allow, Principal: { Service: lambda.amazonaws.com }, Action: sts:AssumeRole }]
+      ManagedPolicyArns: [arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole]
+      Policies:
+        - PolicyName: otlp
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [xray:PutTraceSegments, xray:PutSpans, xray:PutSpansForIndexing]
+                Resource: "*"
+              - Effect: Allow
+                Action: [logs:PutLogEvents, logs:DescribeLogStreams, logs:DescribeLogGroups]
+                Resource: "*"
+              - Effect: Allow
+                Action: cloudwatch:PutMetricData
+                Resource: "*"
+  BedrockNoneRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement: [{ Effect: Allow, Principal: { Service: lambda.amazonaws.com }, Action: sts:AssumeRole }]
+      ManagedPolicyArns: [arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole]
+  BedrockScopedRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement: [{ Effect: Allow, Principal: { Service: lambda.amazonaws.com }, Action: sts:AssumeRole }]
+      ManagedPolicyArns: [arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole]
+      Policies:
+        - PolicyName: one-model
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [bedrock:InvokeModel, bedrock:InvokeModelWithResponseStream]
+                Resource:
+                  - arn:aws:bedrock:*::foundation-model/openai.gpt-oss-120b-1:0
+                  - !Sub arn:aws:bedrock:*:${AWS::AccountId}:project/default
+              - Effect: Allow
+                Action: bedrock-mantle:CreateInference
+                Resource: !Sub arn:aws:bedrock-mantle:*:${AWS::AccountId}:project/default
+  BedrockOpenRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement: [{ Effect: Allow, Principal: { Service: lambda.amazonaws.com }, Action: sts:AssumeRole }]
+      ManagedPolicyArns: [arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole]
+      Policies:
+        - PolicyName: all-bedrock
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [bedrock:InvokeModel, bedrock:InvokeModelWithResponseStream, "bedrock-mantle:*"]
+                Resource: "*"
+
+  # --- Spike 1 on Lambda: outside the VPC, so it can fetch Codex's bwrap.
+  SandboxProbe:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.13
+      Handler: index.handler
+      Role: !GetAtt BasicRole.Arn
+      Timeout: 120
+      MemorySize: 512
+      Code:
+        ZipFile: |
+          import ctypes,hashlib,io,json,os,platform,subprocess,tarfile,urllib.request
+          URL="https://github.com/openai/codex/releases/download/rust-v0.169.0/bwrap-x86_64-unknown-linux-musl.tar.gz"
+          SHA="15fd5f2673d2e1c2f80e34e5108462fd014f5e8bbc7b0731f1ab23d1ff1ac140"
+          def rd(p):
+            try: return open(p).read().strip()
+            except Exception as e: return "unreadable: %s"%e
+          def status():
+            keep=("Seccomp","Seccomp_filters","NoNewPrivs","CapEff","CapBnd","Uid")
+            return {k:v.strip() for k,_,v in (l.partition(":") for l in open("/proc/self/status")) if k in keep}
+          def unshare_user():
+            pid=os.fork()
+            if pid==0:
+              try: os.unshare(os.CLONE_NEWUSER); os._exit(0)
+              except OSError as e: os._exit(e.errno or 1)
+            c=os.waitstatus_to_exitcode(os.waitpid(pid,0)[1])
+            return "ok" if c==0 else "errno %d (%s)"%(c,os.strerror(c))
+          def landlock():
+            libc=ctypes.CDLL(None,use_errno=True); libc.syscall.restype=ctypes.c_long
+            r=libc.syscall(444,None,ctypes.c_size_t(0),ctypes.c_uint32(1))
+            e=ctypes.get_errno()
+            return ("abi %d"%r) if r>=0 else "errno %d (%s)"%(e,os.strerror(e))
+          def bwrap():
+            path="/tmp/bwrap"
+            if not os.path.exists(path):
+              data=urllib.request.urlopen(URL,timeout=30).read()
+              b=tarfile.open(fileobj=io.BytesIO(data)).extractfile("bwrap-x86_64-unknown-linux-musl").read()
+              if hashlib.sha256(b).hexdigest()!=SHA: return {"error":"checksum mismatch"}
+              open(path,"wb").write(b); os.chmod(path,0o755)
+            cases={"none":[],"user":["--unshare-user"],"user+net":["--unshare-user","--unshare-net"],
+                   "user+pid+proc":["--unshare-user","--unshare-pid","--proc","/proc"]}
+            out={}
+            for k,a in cases.items():
+              p=subprocess.run([path,"--ro-bind","/","/","--dev","/dev"]+a+["--","/bin/true"],capture_output=True,text=True,timeout=20)
+              out[k]="ok" if p.returncode==0 else "exit %d: %s"%(p.returncode,p.stderr.strip()[:200])
+            return out
+          def probe():
+            return {"kernel":platform.release(),"uid":os.getuid(),"status":status(),
+              "max_user_namespaces":rd("/proc/sys/user/max_user_namespaces"),
+              "lsm":rd("/sys/kernel/security/lsm"),"unshare_user":unshare_user(),
+              "landlock":landlock(),"bwrap":bwrap()}
+          def handler(e,c): return probe()
+          if __name__=="__main__": print(json.dumps(probe()))
+
+  # --- Spike 2: what an execution environment keeps between invocations.
+  EnvReuse:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.13
+      Handler: index.handler
+      Role: !GetAtt BasicRole.Arn
+      Timeout: 10
+      MemorySize: 256
+      Code:
+        ZipFile: |
+          import os,subprocess,time,uuid
+          INIT=uuid.uuid4().hex[:8]; N=[0]
+          def handler(e,c):
+            N[0]+=1; mode=e.get("mode","check")
+            r={"init":INIT,"invocation_in_init":N[0],"pid":os.getpid(),
+               "marker":open("/tmp/marker").read() if os.path.exists("/tmp/marker") else None,
+               "env_planted":os.environ.get("PLANTED")}
+            try:
+              pid=int(open("/tmp/sleeper").read())
+              r["sleeper"]=open("/proc/%d/stat"%pid).read().split()[2]
+            except Exception as x: r["sleeper"]="gone (%s)"%type(x).__name__
+            if mode=="plant":
+              open("/tmp/marker","w").write("%s@%d"%(INIT,time.time()))
+              p=subprocess.Popen(["sleep","900"],start_new_session=True)
+              open("/tmp/sleeper","w").write(str(p.pid)); os.environ["PLANTED"]=INIT
+            if mode=="crash": os._exit(1)
+            return r
+
+  # --- Spike 8: signed OTLP JSON to CloudWatch from the isolated subnet.
+  OtlpLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties: { LogGroupName: /atomic-spikes/otlp, RetentionInDays: 1 }
+  OtlpLogStream:
+    Type: AWS::Logs::LogStream
+    Properties: { LogGroupName: !Ref OtlpLogGroup, LogStreamName: probe }
+  OtlpProbe:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.13
+      Handler: index.handler
+      Role: !GetAtt OtlpRole.Arn
+      Timeout: 60
+      MemorySize: 256
+      VpcConfig: { SubnetIds: [!Ref IsolatedSubnet], SecurityGroupIds: [!Ref ProbeSg] }
+      Environment:
+        Variables: { LOG_GROUP: !Ref OtlpLogGroup, LOG_STREAM: probe }
+      Code:
+        ZipFile: |
+          import json,os,socket,time,urllib.request,urllib.error,botocore.session
+          from botocore.auth import SigV4Auth
+          from botocore.awsrequest import AWSRequest
+          R=os.environ["AWS_REGION"]; S=botocore.session.get_session()
+          def send(svc,url,payload,hdr={}):
+            body=json.dumps(payload).encode()
+            req=AWSRequest(method="POST",url=url,data=body,headers={"Content-Type":"application/json",**hdr})
+            SigV4Auth(S.get_credentials().get_frozen_credentials(),svc,R).add_auth(req)
+            t=time.time()
+            try:
+              with urllib.request.urlopen(urllib.request.Request(url,data=body,headers=dict(req.headers),method="POST"),timeout=10) as r:
+                res=(r.status,r.read()[:300].decode())
+            except urllib.error.HTTPError as e: res=(e.code,"%s %r"%(e.headers.get("Content-Type"),e.read()[:200]))
+            except Exception as e: res=("error",str(e)[:300])
+            host=url.split("/")[2]
+            return {"status":res[0],"body":res[1],"ms":round((time.time()-t)*1000),"ip":socket.gethostbyname(host)}
+          def kv(k,v): return {"key":k,"value":{"stringValue":v}}
+          def handler(e,c):
+            now=time.time_ns(); res={"attributes":[kv("service.name","atomic-spike")]}; sc={"name":"spike"}
+            span={"traceId":os.urandom(16).hex(),"spanId":os.urandom(8).hex(),"name":"spike-span","kind":1,
+                  "startTimeUnixNano":str(now-10**6),"endTimeUnixNano":str(now),"attributes":[kv("atomic.workflow.id","spike-run")]}
+            log={"timeUnixNano":str(now),"severityText":"INFO","body":{"stringValue":"spike log"},"attributes":[kv("atomic.workflow.id","spike-run")]}
+            def metric(name,temporality):
+              dp={"asInt":"1","startTimeUnixNano":str(now-10**9),"timeUnixNano":str(now),"attributes":[kv("atomic.workflow.id","spike-run")]}
+              return {"resourceMetrics":[{"resource":res,"scopeMetrics":[{"scope":sc,"metrics":[{"name":name,"sum":{"aggregationTemporality":temporality,"isMonotonic":True,"dataPoints":[dp]}}]}]}]}
+            out={}
+            for i in range(2):
+              out["traces#%d"%i]=send("xray","https://xray.%s.amazonaws.com/v1/traces"%R,{"resourceSpans":[{"resource":res,"scopeSpans":[{"scope":sc,"spans":[span]}]}]})
+              out["logs#%d"%i]=send("logs","https://logs.%s.amazonaws.com/v1/logs"%R,{"resourceLogs":[{"resource":res,"scopeLogs":[{"scope":sc,"logRecords":[log]}]}]},
+                {"x-aws-log-group":os.environ["LOG_GROUP"],"x-aws-log-stream":os.environ["LOG_STREAM"]})
+              out["metrics-delta#%d"%i]=send("monitoring","https://monitoring.%s.amazonaws.com/v1/metrics"%R,metric("atomic_spike_delta",1))
+              out["metrics-cumulative#%d"%i]=send("monitoring","https://monitoring.%s.amazonaws.com/v1/metrics"%R,metric("atomic_spike_cumulative",2))
+            return out
+
+  # --- Spike 6: Bedrock from the isolated subnet, under three roles.
+  BedrockNone:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.13
+      Handler: index.handler
+      Role: !GetAtt BedrockNoneRole.Arn
+      Timeout: 60
+      MemorySize: 256
+      VpcConfig: { SubnetIds: [!Ref IsolatedSubnet], SecurityGroupIds: [!Ref ProbeSg] }
+      Code:
+        ZipFile: |
+          import json,os,socket,time,urllib.request,urllib.error,botocore.session
+          from botocore.auth import SigV4Auth
+          from botocore.awsrequest import AWSRequest
+          R=os.environ["AWS_REGION"]; S=botocore.session.get_session()
+          T={"mantle":("bedrock-mantle","https://bedrock-mantle.%s.api.aws/openai/v1/responses"%R),
+             "runtime":("bedrock","https://bedrock-runtime.%s.amazonaws.com/openai/v1/responses"%R)}
+          def call(svc,url,model):
+            body=json.dumps({"model":model,"input":"Reply with one word: ready","max_output_tokens":16}).encode()
+            req=AWSRequest(method="POST",url=url,data=body,headers={"Content-Type":"application/json"})
+            SigV4Auth(S.get_credentials().get_frozen_credentials(),svc,R).add_auth(req)
+            t=time.time()
+            try:
+              with urllib.request.urlopen(urllib.request.Request(url,data=body,headers=dict(req.headers),method="POST"),timeout=30) as r:
+                d=json.loads(r.read()); txt=[c.get("text") for o in d.get("output",[]) for c in o.get("content",[]) or [] if c.get("text")]
+                res=(r.status,{"text":txt,"usage":d.get("usage")})
+            except urllib.error.HTTPError as e: res=(e.code,e.read()[:400].decode())
+            except Exception as e: res=("error",str(e)[:300])
+            return {"status":res[0],"body":res[1],"ms":round((time.time()-t)*1000)}
+          def models(svc,url):
+            u=url.rsplit("/",1)[0]+"/models"; req=AWSRequest(method="GET",url=u)
+            SigV4Auth(S.get_credentials().get_frozen_credentials(),svc,R).add_auth(req)
+            try:
+              with urllib.request.urlopen(urllib.request.Request(u,headers=dict(req.headers)),timeout=30) as r:
+                return sorted(m.get("id") for m in json.loads(r.read()).get("data",[]))
+            except urllib.error.HTTPError as x: return "%d %s"%(x.code,x.read()[:200])
+            except Exception as x: return str(x)[:200]
+          def handler(e,c):
+            out={}
+            for name,(svc,url) in T.items():
+              if e.get("list"): out["%s models"%name]=models(svc,url)
+              host=url.split("/")[2]
+              try: ip=socket.gethostbyname(host)
+              except Exception as x: ip="dns: %s"%x
+              for m in e.get(name,[]): out["%s %s"%(name,m)]=dict(call(svc,url,m),ip=ip)
+            return out
+  BedrockScoped:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.13
+      Handler: index.handler
+      Role: !GetAtt BedrockScopedRole.Arn
+      Timeout: 60
+      MemorySize: 256
+      VpcConfig: { SubnetIds: [!Ref IsolatedSubnet], SecurityGroupIds: [!Ref ProbeSg] }
+      Code:
+        ZipFile: |
+          import json,os,socket,time,urllib.request,urllib.error,botocore.session
+          from botocore.auth import SigV4Auth
+          from botocore.awsrequest import AWSRequest
+          R=os.environ["AWS_REGION"]; S=botocore.session.get_session()
+          T={"mantle":("bedrock-mantle","https://bedrock-mantle.%s.api.aws/openai/v1/responses"%R),
+             "runtime":("bedrock","https://bedrock-runtime.%s.amazonaws.com/openai/v1/responses"%R)}
+          def call(svc,url,model):
+            body=json.dumps({"model":model,"input":"Reply with one word: ready","max_output_tokens":16}).encode()
+            req=AWSRequest(method="POST",url=url,data=body,headers={"Content-Type":"application/json"})
+            SigV4Auth(S.get_credentials().get_frozen_credentials(),svc,R).add_auth(req)
+            t=time.time()
+            try:
+              with urllib.request.urlopen(urllib.request.Request(url,data=body,headers=dict(req.headers),method="POST"),timeout=30) as r:
+                d=json.loads(r.read()); txt=[c.get("text") for o in d.get("output",[]) for c in o.get("content",[]) or [] if c.get("text")]
+                res=(r.status,{"text":txt,"usage":d.get("usage")})
+            except urllib.error.HTTPError as e: res=(e.code,e.read()[:400].decode())
+            except Exception as e: res=("error",str(e)[:300])
+            return {"status":res[0],"body":res[1],"ms":round((time.time()-t)*1000)}
+          def models(svc,url):
+            u=url.rsplit("/",1)[0]+"/models"; req=AWSRequest(method="GET",url=u)
+            SigV4Auth(S.get_credentials().get_frozen_credentials(),svc,R).add_auth(req)
+            try:
+              with urllib.request.urlopen(urllib.request.Request(u,headers=dict(req.headers)),timeout=30) as r:
+                return sorted(m.get("id") for m in json.loads(r.read()).get("data",[]))
+            except urllib.error.HTTPError as x: return "%d %s"%(x.code,x.read()[:200])
+            except Exception as x: return str(x)[:200]
+          def handler(e,c):
+            out={}
+            for name,(svc,url) in T.items():
+              if e.get("list"): out["%s models"%name]=models(svc,url)
+              host=url.split("/")[2]
+              try: ip=socket.gethostbyname(host)
+              except Exception as x: ip="dns: %s"%x
+              for m in e.get(name,[]): out["%s %s"%(name,m)]=dict(call(svc,url,m),ip=ip)
+            return out
+  BedrockOpen:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.13
+      Handler: index.handler
+      Role: !GetAtt BedrockOpenRole.Arn
+      Timeout: 60
+      MemorySize: 256
+      VpcConfig: { SubnetIds: [!Ref IsolatedSubnet], SecurityGroupIds: [!Ref ProbeSg] }
+      Code:
+        ZipFile: |
+          import json,os,socket,time,urllib.request,urllib.error,botocore.session
+          from botocore.auth import SigV4Auth
+          from botocore.awsrequest import AWSRequest
+          R=os.environ["AWS_REGION"]; S=botocore.session.get_session()
+          T={"mantle":("bedrock-mantle","https://bedrock-mantle.%s.api.aws/openai/v1/responses"%R),
+             "runtime":("bedrock","https://bedrock-runtime.%s.amazonaws.com/openai/v1/responses"%R)}
+          def call(svc,url,model):
+            body=json.dumps({"model":model,"input":"Reply with one word: ready","max_output_tokens":16}).encode()
+            req=AWSRequest(method="POST",url=url,data=body,headers={"Content-Type":"application/json"})
+            SigV4Auth(S.get_credentials().get_frozen_credentials(),svc,R).add_auth(req)
+            t=time.time()
+            try:
+              with urllib.request.urlopen(urllib.request.Request(url,data=body,headers=dict(req.headers),method="POST"),timeout=30) as r:
+                d=json.loads(r.read()); txt=[c.get("text") for o in d.get("output",[]) for c in o.get("content",[]) or [] if c.get("text")]
+                res=(r.status,{"text":txt,"usage":d.get("usage")})
+            except urllib.error.HTTPError as e: res=(e.code,e.read()[:400].decode())
+            except Exception as e: res=("error",str(e)[:300])
+            return {"status":res[0],"body":res[1],"ms":round((time.time()-t)*1000)}
+          def models(svc,url):
+            u=url.rsplit("/",1)[0]+"/models"; req=AWSRequest(method="GET",url=u)
+            SigV4Auth(S.get_credentials().get_frozen_credentials(),svc,R).add_auth(req)
+            try:
+              with urllib.request.urlopen(urllib.request.Request(u,headers=dict(req.headers)),timeout=30) as r:
+                return sorted(m.get("id") for m in json.loads(r.read()).get("data",[]))
+            except urllib.error.HTTPError as x: return "%d %s"%(x.code,x.read()[:200])
+            except Exception as x: return str(x)[:200]
+          def handler(e,c):
+            out={}
+            for name,(svc,url) in T.items():
+              if e.get("list"): out["%s models"%name]=models(svc,url)
+              host=url.split("/")[2]
+              try: ip=socket.gethostbyname(host)
+              except Exception as x: ip="dns: %s"%x
+              for m in e.get(name,[]): out["%s %s"%(name,m)]=dict(call(svc,url,m),ip=ip)
+            return out
+
+  # --- Spike 1 on Fargate: the same probe as SandboxProbe, run once.
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties: { ClusterName: atomic-spikes }
+  TaskLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties: { LogGroupName: /atomic-spikes/fargate, RetentionInDays: 1 }
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement: [{ Effect: Allow, Principal: { Service: ecs-tasks.amazonaws.com }, Action: sts:AssumeRole }]
+      ManagedPolicyArns: [arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy]
+  SandboxTask:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: atomic-spikes-sandbox
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: "256"
+      Memory: "512"
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      RuntimePlatform: { CpuArchitecture: X86_64, OperatingSystemFamily: LINUX }
+      ContainerDefinitions:
+        - Name: probe
+          Image: public.ecr.aws/docker/library/python@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90
+          Essential: true
+          # The probe source is passed at run time (run.sh) as PROBE, the
+          # same code as SandboxProbe.
+          Command: [python, -c, "import os; exec(os.environ['PROBE'])"]
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref TaskLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: probe
+  TaskSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Fargate probe, egress only
+      VpcId: !Ref Vpc
+      SecurityGroupEgress: [{ IpProtocol: "-1", CidrIp: 0.0.0.0/0 }]
+
+Outputs:
+  SandboxProbe: { Value: !Ref SandboxProbe }
+  EnvReuse: { Value: !Ref EnvReuse }
+  OtlpProbe: { Value: !Ref OtlpProbe }
+  BedrockNone: { Value: !Ref BedrockNone }
+  BedrockScoped: { Value: !Ref BedrockScoped }
+  BedrockOpen: { Value: !Ref BedrockOpen }
+  Cluster: { Value: !Ref Cluster }
+  SandboxTask: { Value: !Ref SandboxTask }
+  PublicSubnet: { Value: !Ref PublicSubnet }
+  TaskSg: { Value: !Ref TaskSg }
