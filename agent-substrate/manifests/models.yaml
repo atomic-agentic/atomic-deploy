@@ -1,0 +1,22 @@
+# The model server, outside the cluster: Lemonade (OpenAI-compatible) in
+# Docker on the host, reached on docker0 through a selectorless Service. Only
+# agentgateway calls it; the provider key is the lemonade-key Secret in
+# agentgateway-system, which up.sh creates from .env.
+apiVersion: v1
+kind: Service
+metadata:
+  name: lemonade
+  namespace: models
+spec:
+  ports: [{name: http, port: ${MODEL_PORT}, targetPort: ${MODEL_PORT}}]
+---
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  name: lemonade-host
+  namespace: models
+  labels:
+    kubernetes.io/service-name: lemonade
+addressType: IPv4
+ports: [{name: http, port: ${MODEL_PORT}}]
+endpoints: [{addresses: ["${MODEL_HOST_IP}"]}]

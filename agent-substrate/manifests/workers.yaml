@@ -1,0 +1,28 @@
+# The worker pool atomic's runner actors are placed on: gVisor workers, two so
+# an actor can resume on another one. The runner template selects it by the
+# workload label. Each worker holds one actor at a time; Substrate evicts
+# nothing to make room (findings.md, "Idle actors and capacity").
+apiVersion: ate.dev/v1
+kind: WorkerPool
+metadata:
+  name: runners
+  namespace: atomic-runners
+  labels:
+    workload: atomic-runner
+spec:
+  replicas: ${WORKER_REPLICAS}
+  # ghcr.io/kagent-dev/substrate/ateworker-gvisor:v1.0.0, the worker kagent's
+  # own pool runs.
+  workerImage: ghcr.io/kagent-dev/substrate/ateworker-gvisor@sha256:ba3b63e1d307f7dc5e5191d586811c8736bd3f69ec6209f5f4ea061fed5ffeee
+  sandboxClasses:
+    - name: gvisor
+      configRef:
+        name: gvisor-default
+  template:
+    resources:
+      limits:
+        cpu: "1"
+        memory: 1Gi
+      requests:
+        cpu: 250m
+        memory: 1Gi

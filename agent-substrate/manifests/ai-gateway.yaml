@@ -1,0 +1,109 @@
+# agentgateway v1.7.0 as the model gateway (findings.md, spikes 3 and 10).
+# Actors reach it only through Substrate's egress gateway, which swaps their
+# placeholder Authorization header for an actor JWT (audience ai-gateway).
+# agentgateway validates the JWT against Substrate's IdP, allows only actors
+# in atomic's atespace, and sends the request to the model server with the
+# provider key from the lemonade-key Secret, which no actor ever sees.
+#
+# up.sh fills in MODEL_NAME, MODEL_PORT, ATESPACE, and IDP_JWKS, the IdP's
+# current keys.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: ai-gateway
+  namespace: agentgateway-system
+spec:
+  gatewayClassName: agentgateway
+  listeners:
+    - name: http
+      port: 80
+      protocol: HTTP
+      allowedRoutes: {namespaces: {from: Same}}
+---
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayBackend
+metadata:
+  name: lemonade
+  namespace: agentgateway-system
+spec:
+  ai:
+    provider:
+      openai:
+        model: ${MODEL_NAME}
+      host: lemonade.models.svc.cluster.local
+      port: ${MODEL_PORT}
+      path: /api/v1/chat/completions
+  policies:
+    auth:
+      secretRef:
+        name: lemonade-key
+---
+# The Responses API, which Codex speaks (wire_api = "responses").
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayBackend
+metadata:
+  name: lemonade-responses
+  namespace: agentgateway-system
+spec:
+  ai:
+    provider:
+      openai:
+        model: ${MODEL_NAME}
+      host: lemonade.models.svc.cluster.local
+      port: ${MODEL_PORT}
+      path: /v1/responses
+  policies:
+    auth:
+      secretRef:
+        name: lemonade-key
+    # Without this, agentgateway parses every request as chat completions.
+    ai:
+      routes:
+        "/v1/responses": Responses
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: lemonade
+  namespace: agentgateway-system
+spec:
+  parentRefs: [{name: ai-gateway}]
+  rules:
+    - matches: [{path: {type: PathPrefix, value: /v1/chat/completions}}]
+      backendRefs:
+        - group: agentgateway.dev
+          kind: AgentgatewayBackend
+          name: lemonade
+    - matches: [{path: {type: PathPrefix, value: /v1/responses}}]
+      backendRefs:
+        - group: agentgateway.dev
+          kind: AgentgatewayBackend
+          name: lemonade-responses
+---
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: actor-jwt
+  namespace: agentgateway-system
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: ai-gateway
+  traffic:
+    jwtAuthentication:
+      mode: Strict
+      providers:
+        - issuer: https://idp.ate-system.svc
+          audiences: [ai-gateway]
+          # Substrate's IdP JWKS (https://idp.ate-system.svc/openid/v1/jwks),
+          # inlined at install. A key rotation needs up.sh run again until
+          # agentgateway fetches it remotely, which needs it to trust
+          # Substrate's servicedns CA (atomic-1b7t.18).
+          jwks:
+            inline: '${IDP_JWKS}'
+    authorization:
+      action: Allow
+      policy:
+        matchExpressions:
+          - 'jwt["actor.ate.dev"].atespace == "${ATESPACE}"'

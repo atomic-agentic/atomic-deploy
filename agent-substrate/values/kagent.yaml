@@ -1,0 +1,12 @@
+# kagent CLI configuration: `kagent --config kagent.yaml install --profile
+# minimal`, run from this directory (up.sh does). Chart repositories and
+# versions are the CLI's defaults for v1.0.1: kagent 1.0.1 and Substrate
+# 1.0.0 from kagent-dev/substrate's charts.
+install:
+  defaultModelProvider: OpenAI
+  atelet:
+    valuesFiles:
+      - atelet.yaml
+  substrate:
+    valuesFiles:
+      - substrate.yaml

@@ -1,0 +1,11 @@
+# atelet pulls actor images from inside its pod, where localhost is the pod
+# itself. Images named localhost:5000/... come from the registry container on
+# docker0 instead (up.sh starts it), as Substrate's kind setup does with its
+# kind-registry container.
+#
+# Snapshot upload and detach delays stay at Substrate's defaults (5 and 30
+# minutes). findings.md, spike 7, shortened them to measure restores from
+# rustfs.
+atelet:
+  extraArgs:
+    - --localhost-registry-replacement=172.17.0.1:5000

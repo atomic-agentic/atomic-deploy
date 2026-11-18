@@ -1,0 +1,15 @@
+# Codex configuration for execution-only placement: Codex runs in the control
+# plane (here a container on the host, standing in for atomic serve) and calls
+# the model itself; commands run in the actor through exec-server.
+# MODEL_NAME and MODEL_PORT are filled in from .env.
+model = "${MODEL_NAME}"
+model_provider = "lemonade"
+approval_policy = "never"
+# The actor is the boundary; nothing else of value lives in it.
+default_permissions = ":danger-full-access"
+
+[model_providers.lemonade]
+name = "Lemonade"
+base_url = "http://127.0.0.1:${MODEL_PORT}/v1"
+wire_api = "responses"
+env_key = "LEMONADE_KEY"

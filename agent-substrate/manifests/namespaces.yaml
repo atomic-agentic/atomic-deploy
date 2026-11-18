@@ -1,0 +1,20 @@
+# The deployment's own namespaces. atomic's (the control plane, for now the
+# atomic serve stand-in) is in Istio ambient; the runners' worker pods and the
+# model Service are not: Substrate's workers stay out of the mesh, and
+# Lemonade is outside the cluster.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: atomic
+  labels:
+    istio.io/dataplane-mode: ambient
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: atomic-runners
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: models

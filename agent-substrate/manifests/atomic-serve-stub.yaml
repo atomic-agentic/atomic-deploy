@@ -1,0 +1,42 @@
+# A stand-in for atomic serve, until atomic has it: records each request it
+# receives (images/atomic-serve-stub). The kagent bridge forwards gate
+# decisions to it through Substrate's egress gateway.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: atomic-serve
+  namespace: atomic
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: atomic-serve}
+  template:
+    metadata:
+      labels: {app: atomic-serve}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: atomic-serve
+          image: ${STUB_IMAGE}
+          ports: [{containerPort: 8080, name: http}]
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {memory: 64Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: atomic-serve
+  namespace: atomic
+spec:
+  selector: {app: atomic-serve}
+  ports: [{name: http, port: 80, targetPort: http}]

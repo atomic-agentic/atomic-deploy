@@ -1,7 +1,0 @@
-# Clients the router accepts, by SPIFFE ID. kagent install allows only its
-# controller; `kubectl ate proxy` presents atenet-client's certificate. The list
-# replaces kagent's, so it repeats the controller.
-atenetRouter:
-  ingressAllowedSPIFFEIDs:
-    - spiffe://cluster.local/ns/kagent/sa/kagent-controller
-    - spiffe://cluster.local/ns/ate-system/sa/atenet-client

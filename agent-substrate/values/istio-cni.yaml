@@ -1,0 +1,5 @@
+# Istio 1.32 ambient's CNI node agent on k3s: k3s keeps its CNI configuration
+# and binaries outside the default paths.
+profile: ambient
+global:
+  platform: k3s
