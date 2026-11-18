@@ -1,0 +1,10 @@
+# syntax=docker/dockerfile:1@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e
+# SPDX-License-Identifier: Apache-2.0
+#
+# The same agent-runner spike with Codex built from atomic's fork
+# (atomic-agentic/codex, branch `atomic`) instead of the release: place the
+# binary, built for Amazon Linux 2023, as `codex` in the build context.
+FROM public.ecr.aws/lambda/python:3.13@sha256:eac388575a9ff5c116d32b9620675341f998def5fe224fc3752186986afa9a4a
+COPY codex /opt/codex/codex
+COPY handler.py shim.py ${LAMBDA_TASK_ROOT}/
+CMD ["handler.handler"]

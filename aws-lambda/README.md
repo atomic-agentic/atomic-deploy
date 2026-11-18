@@ -66,7 +66,7 @@ from CloudWatch.
 | Lite atoms, OpenAPI and MCP calls through the executor, gates, workflow code | The control plane | No code executes. A Lambda would only wait on the model, and credentials stay where they already are |
 | Codex atoms with declared tools and no shell | The control plane, with Codex's shell tool off | Codex's sandbox cannot start on Fargate, so the control plane never runs model-directed commands |
 | Atom code: `---ts` blocks, scripts, exec atoms, file parsers | `code` runner on Lambda, one invocation per execution | Untrusted code on untrusted input gets a microVM, sees only its declared inputs, and returns its outputs |
-| Codex atoms that need a shell, and stdio MCP servers | `agent` runner on Lambda, one invocation per attempt (harness mode) | The whole turn runs inside the microVM; its model and tool calls go back to the control plane, which holds the credentials |
+| Codex atoms that need a shell, and stdio MCP servers | `agent` runner on Lambda, one invocation per attempt (harness mode), with atomic's Codex fork (gap 20) | The whole turn runs inside the microVM; its model and tool calls go back to the control plane, which holds the credentials. Upstream Codex 0.169 cannot start a command in Lambda, because Lambda refuses the `prctl` call Codex makes before each one; the fork makes that call best effort |
 
 Codex's sandbox cannot start on either platform; the [spikes](spikes/README.md)
 ran Codex's own `bwrap` on both. Fargate refuses user namespaces. Lambda
@@ -395,6 +395,7 @@ to. **Blocking** means the deployment cannot work without it.
 | 17 | SigV4-signed OTLP export, with an in-process content filter | CloudWatch's OTLP endpoints take only SigV4 for traces, and no collector runs to filter content | **Assumed delivered** (see the status note) | M44 (`atomic-xt2b.5` to `.8`), `atomic-jalw.1` |
 | 18 | **Blocking.** The console as a separate service | The console plan embeds the console in `atomic serve`: static assets, an in-process thread bridge, one origin | `atomic serve`'s API, event stream and thread bridge usable by a console in another process, on an internal listener; the person's OIDC token accepted on every call, so authorization and the audit record are the person's; the console's service identity limited to reads; the console plan's security rules (no state change without a human session, `Origin` and `Host` checks, untrusted text escaped) kept across the hop | M49 (`atomic-mvy3`), console plan (`atomic-lone`, `atomic-ro1a`), M27 |
 | 19 | The console's telemetry screens from CloudWatch | The console plan links out to the trace backend in the team profile; here CloudWatch is the only backend and the console draws from it | A read-only CloudWatch adapter for the trace, metric and log screens: spans and logs through Logs Insights by `atomic.workflow.id` and trace ID (about a second per run in the spikes, with no span indexing), metrics with PromQL (about 100 ms), keeping CloudWatch's dotted attribute names and `@resource.` prefixes; no storage, no query engine. It changes the console plan's team-profile position, so it needs a decision there first | Console plan (Telemetry: local viewer, team link-out), M44, M49 |
+| 20 | Codex commands without `prctl` or a pseudo-terminal | Lambda's seccomp policy refuses every `prctl` and provides no pseudo-terminals. Upstream Codex 0.169 calls `prctl(PR_SET_PDEATHSIG)` before every command and fails if it cannot, so in a Lambda function its model loop runs but no command starts, in any sandbox mode (spike 10) | **Done in atomic's fork:** [atomic-agentic/codex](https://github.com/atomic-agentic/codex) branch `atomic`, commit `a4b0cac`, makes the signal best effort; with it, commands run in Lambda (spike 10). Codex's configuration sets `[features] unified_exec_tty = false` so commands always use pipes. Still to do: track the fork in `deps/forks.toml`, rebase it in the Codex bump procedure, offer it upstream with the telemetry changes (`atomic-xt2b.8`), and make atomic's own process launches (the `code` runner's Deno, scripts) tolerate a refused `prctl` the same way | M24, M52, `atomic-xt2b.5` |
 
 Gaps 1 to 4 are the ones to design before 1.0 freezes: they change the
 `ExecutionBackend` statement at connect, add a second kind of backend, and fix
@@ -402,7 +403,8 @@ how recovery decides ownership. Gap 15 is blocking in practice but not a
 design question: Codex already signs Bedrock requests, and lite atoms need the
 same path. Gap 18 decides whether the console's security model survives being
 moved out of `atomic serve`, so it belongs in the console plan's open
-questions now.
+questions now. Gap 20 decided whether the `agent` runner can be a Lambda
+function at all; atomic's Codex fork closes it.
 
 ## Gaps in this repository
 
@@ -438,11 +440,12 @@ the probes and the full results.
 | Bedrock from a private subnet | Mantle and Runtime both work through PrivateLink. Runtime can be limited to one model by IAM; Mantle cannot. OpenAI frontier models need per-account access. `gpt-oss-120b` serves the Responses API with tools and streaming on Mantle's `/v1` route; Qwen and Gemma answer chat completions with strict JSON schemas on Runtime | Decision 8: Runtime for an IAM-enforced allowlist, Mantle `/v1` with gpt-oss-120b for testing Codex atoms now; gap 15: lite atoms speak chat completions, or a `submit` tool |
 | CloudWatch from runner subnets | OTLP logs, metrics and traces all accepted through VPC endpoints, 20 to 60 ms per warm request; traces only with Transaction Search on | Decision 7: the template enables Transaction Search |
 | The console's queries | A run's spans and logs by `atomic.workflow.id` in about a second through Logs Insights, with no span indexing; metrics by PromQL in about 100 ms | Gap 19 is feasible as designed |
+| Codex in a Lambda function | Its model loop runs, through a loopback shim to Mantle, with the shim's rewrite working; init 0.6 s, but the first `codex exec` in a new environment 31 to 40 s against 2 to 14 s warm. Upstream Codex cannot start any command, because Lambda refuses `prctl`; with atomic's fork, commands run | Gap 20, closed by the fork; the `agent` runner stays on Lambda |
 
 Still to run, since they need atomic itself or OpenAI model access on Bedrock:
 
-1. **Cold starts.** Start time of the `code` runner with Deno and a typical
-   toolchain, and of the `agent` runner with Codex.
+1. **Cold starts of the `code` runner,** with Deno and a typical toolchain.
+   (The `agent` runner's are measured: spike 10.)
 2. **The gateway under a Codex turn.** Streamed model responses relayed
    through the gateway listener and the loopback shim, with the per-request
    policy check in the path.

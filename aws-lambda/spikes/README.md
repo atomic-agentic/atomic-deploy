@@ -11,6 +11,7 @@ Run on 2026-11-17 in `us-west-2`.
 | [`template.yaml`](template.yaml) | The spike stack: a VPC with a public subnet and an isolated one (no route out), interface endpoints for CloudWatch Logs, metrics, X-Ray, Bedrock Mantle and Bedrock Runtime, six Lambda probes and a Fargate task definition |
 | [`run.sh`](run.sh) | Runs every probe and prints the raw results as JSON lines |
 | [`landlock_probe.py`](landlock_probe.py) | A follow-up for Fargate, passed to the task as its `PROBE` |
+| [`agent-runner/`](agent-runner) | Spike 10: Codex in a Lambda function with a loopback shim, its image and stack |
 
 ```sh
 aws cloudformation deploy --stack-name atomic-spikes \
@@ -173,11 +174,85 @@ PromQL returns differs from Prometheus in ways the dashboards have to follow:
 - Every selector needs a metric name; a regular expression on `__name__` is
   refused.
 
+## 10. Codex in a Lambda function
+
+A stand-in for the design's `agent` runner: Lambda's Python 3.13 base image
+with Codex `rust-v0.169.0` (the release binary, checksum-checked in the
+build), a [handler](agent-runner/handler.py) that runs one `codex exec` per
+invocation, and the [loopback shim](agent-runner/shim.py) Codex's provider
+points at, which rewrites assistant messages for Mantle's `/v1` route and
+re-signs with SigV4. The function's role may only call
+`bedrock-mantle:CreateInference`; the model is `openai.gpt-oss-120b`. Codex
+runs with `--sandbox danger-full-access`, since its sandbox cannot start in
+Lambda (spike 1). The image is 451 MB.
+
+| Question | Result |
+| --- | --- |
+| Does Codex's model loop run in Lambda? | **Yes.** Eight turns, up to seven model requests each, every request 200 through the shim |
+| Does the shim's rewrite work? | **Yes.** Two follow-up requests each carried an assistant message in the list form; rewritten, both were accepted |
+| Cold start | Init 0.57 s (the Python runtime and the shim). The first `codex exec` in a new environment then took 31 s and 40 s on two cold starts, against 4 to 14 s warm, for the same kinds of turn; most likely the 294 MB binary being paged in from the lazily loaded image. Peak memory 244 MB |
+| Can Codex run a shell command? | **No, in any mode.** With its pseudo-terminal: `failed to openpty: No such file or directory`. Without it (`[features] unified_exec_tty = false`), and with `unified_exec = false`: `Failed to create unified exec process: Operation not permitted` |
+
+Why, from a probe in the same function and Codex's source at the pinned
+revision:
+
+| Call, in a child before `exec` | In Lambda |
+| --- | --- |
+| `prctl(PR_SET_PDEATHSIG)` | **`EPERM`** |
+| `prctl(PR_SET_NO_NEW_PRIVS)` | **`EPERM`** |
+| `prctl(PR_SET_DUMPABLE, 0)` | **`EPERM`** |
+| `setsid()`, `setpgid(0, 0)`, `setrlimit(RLIMIT_CORE, 0)` | ok |
+| `openpty()` | `ENOENT`: no `/dev/ptmx`, no `/dev/pts` |
+
+Lambda's seccomp policy refuses every `prctl`. Codex's command launcher
+(`set_parent_death_signal` in `codex-rs/utils/pty/src/process_group.rs`)
+calls `prctl(PR_SET_PDEATHSIG)` before every command and treats a failure as
+fatal, so no command can start. Bubblewrap is not an option either, for the
+same reason: its first step is `prctl(PR_SET_NO_NEW_PRIVS)`, and Lambda also
+refuses user namespaces, with no capabilities or seccomp settings a function
+can change. Codex atoms that need a shell can therefore run on Lambda only
+after a change to Codex: a best-effort parent-death signal, and commands over
+pipes rather than a pseudo-terminal.
+
+**With atomic's Codex fork.** [atomic-agentic/codex](https://github.com/atomic-agentic/codex),
+branch `atomic`, is `rust-v0.169.0` plus one commit (`a4b0cac`):
+`set_parent_death_signal` now carries on without the signal when `prctl`
+fails with `EPERM`, `EACCES` or `ENOSYS`, as `detach_from_tty` already does
+when `setsid` is refused, with Linux unit tests. Built for Amazon Linux 2023
+(glibc, LTO off for the spike) and run in the same function through
+[`Dockerfile.fork`](agent-runner/Dockerfile.fork):
+
+| Turn | Result |
+| --- | --- |
+| Tool turn, `unified_exec_tty = false`, cold | **Commands run**: `bash -lc 'uname -r && head -1 /proc/meminfo'` succeeded, and the answer gave the Lambda kernel (`5.10.255-271-319.1120.amzn2.x86_64`) and memory. 34 s, nearly all Codex's first run |
+| The same, warm | Succeeded, 2.8 s; one follow-up rewritten by the shim, accepted |
+| Announce first, then the command | Succeeded, 2.2 s |
+| Tool turn with Codex's default terminal setting | Succeeded, 1.9 s: the model did not ask for a terminal, so Codex used pipes. Setting `unified_exec_tty = false` keeps it that way when a model does ask |
+
+So the `agent` runner on Lambda needs the fork's commit and one setting.
+
+Workarounds looked for, and why none applies:
+
+- **Pipes work.** Shell tools for Lambda ([lambdash](https://alestic.com/2014/11/aws-lambda-shell/)
+  and its descendants) run commands as ordinary subprocesses, as the probe
+  above does. That is what Codex needs once it stops requiring `prctl`.
+- **No pseudo-terminal can be had.** [remote-pty](https://github.com/TimeToogo/remote-pty)
+  emulates one by intercepting libc's terminal calls (through `LD_PRELOAD`, or
+  linked into a patched static shell) and forwarding them to a real PTY on
+  another machine. It is explicitly experimental, and it cannot reach Codex:
+  Codex is a static musl binary that opens the PTY itself, and it strips
+  `LD_PRELOAD` from the commands it starts.
+- **AWS documents no `prctl` restriction,** and offers no setting to lift
+  one. Other software hits the same `prctl: Operation not permitted` on Lambda,
+  Chromium for example.
+
 ## Not run
 
-Spike 3 (cold starts of real runner images), 4 (a Codex turn streamed through
-the gateway), 5 (rollouts) and 7 (agent quality on Bedrock models) need
-atomic itself or OpenAI model access on Bedrock.
+Spike 4 (a Codex turn streamed through the control plane's gateway rather than
+straight to Bedrock), 5 (rollouts) and 7 (agent quality on Bedrock models)
+need atomic itself or OpenAI model access on Bedrock. Spike 3 (cold starts) is
+done for an image with Codex only; the `code` runner's image with Deno is not
+measured.
 
 ### gpt-oss-120b on Mantle's `/v1` route
 

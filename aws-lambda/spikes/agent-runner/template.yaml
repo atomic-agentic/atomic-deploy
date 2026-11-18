@@ -1,0 +1,49 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# The agent-runner spike: one Lambda function from the image in this
+# directory, whose role may only call Bedrock Mantle. Temporary; delete after
+# use. See README.md.
+AWSTemplateFormatVersion: "2010-09-09"
+Description: atomic agent-runner spike (temporary; delete after use)
+
+Parameters:
+  ImageUri:
+    Type: String
+    Description: The agent-runner image in ECR, by digest
+
+Resources:
+  Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement: [{ Effect: Allow, Principal: { Service: lambda.amazonaws.com }, Action: sts:AssumeRole }]
+      ManagedPolicyArns: [arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole]
+      Policies:
+        - PolicyName: mantle-inference-only
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: bedrock-mantle:CreateInference
+                Resource: !Sub arn:aws:bedrock-mantle:${AWS::Region}:${AWS::AccountId}:project/default
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/atomic-spikes-agent-runner
+      RetentionInDays: 1
+  Function:
+    Type: AWS::Lambda::Function
+    DependsOn: LogGroup
+    Properties:
+      FunctionName: atomic-spikes-agent-runner
+      PackageType: Image
+      Code: { ImageUri: !Ref ImageUri }
+      Role: !GetAtt Role.Arn
+      Timeout: 300
+      MemorySize: 3008
+      EphemeralStorage: { Size: 1024 }
+      Architectures: [x86_64]
+
+Outputs:
+  Function: { Value: !Ref Function }
