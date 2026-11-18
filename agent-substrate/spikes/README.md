@@ -53,12 +53,12 @@ does with its own registry. Images are named `localhost:5000/<name>`.
 
 | # | Spike | Question | Status |
 | --- | --- | --- | --- |
-| 1 | Platform | Do kagent 1.0.1 and Substrate 1.0.0 install and run Substrate's `counter` demo on k3s 1.37 with containerd and SELinux enforcing? Does a microVM worker pool run on `/dev/kvm`? Is `proxy_arp` needed outside kind? | gVisor: works. microVM: not done |
-| 8 | Footprint | Memory and CPU of the platform before any actor, and per actor in each pool | gVisor done |
-| 4 | WebSocket through the router (`atomic-2h8u`) | Does an inbound WebSocket upgrade reach an actor through `atenet-router`? A plain echo actor first; Codex's exec-server only if that works | Echo works on both router paths; exec-server not done |
-| 5 | Codex's sandbox in gVisor (`atomic-k0dx`) | Can bubblewrap create its namespaces inside a gVisor actor? The [AWS spikes'](../../aws-lambda/spikes) sandbox probe, served over HTTP since actors have no exec API | Done; one Codex setting left |
-| 7 | Snapshot and resume (`atomic-klse`) | Volume snapshot size and synchronous suspend and resume times with a large worktree in the actor's durable directory | Small actor only |
-| 6 | kagent bridge | Can a bring-your-own harness, built from kagent's `byoa2a` example, show a gate as `input-required`, be suspended, and resume when answered? | Not started |
+| 1 | Platform | Do kagent 1.0.1 and Substrate 1.0.0 install and run Substrate's `counter` demo on k3s 1.37 with containerd and SELinux enforcing? Does a microVM worker pool run on `/dev/kvm`? Is `proxy_arp` needed outside kind? | Works on gVisor and on microVMs |
+| 8 | Footprint | Memory and CPU of the platform before any actor, and per actor in each pool | Done |
+| 4 | WebSocket through the router (`atomic-2h8u`) | Does an inbound WebSocket upgrade reach an actor through `atenet-router`? A plain echo actor first; Codex's exec-server only if that works | Works; a session cannot span a suspend |
+| 5 | Codex's sandbox in gVisor (`atomic-k0dx`) | Can bubblewrap create its namespaces inside a gVisor actor? The [AWS spikes'](../../aws-lambda/spikes) sandbox probe, served over HTTP since actors have no exec API | Works with the right template and Codex profile |
+| 7 | Snapshot and resume (`atomic-klse`) | Volume snapshot size and synchronous suspend and resume times with a large worktree in the actor's durable directory | Done, node-local restores only |
+| 6 | kagent bridge | Can a bring-your-own harness, built from kagent's `byoa2a` example, show a gate as `input-required`, be suspended, and resume when answered? | Works on kagent's side; forwarding to atomic not tried |
 
 Spike 9 (one trace per run) waits for the observability stack in the cluster;
 spikes 2 and 3 for Istio and agentgateway.

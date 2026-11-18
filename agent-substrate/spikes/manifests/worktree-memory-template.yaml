@@ -1,0 +1,28 @@
+# Spike 7: a large worktree in the actor's durable directory, snapshotted at
+# SNAPSHOT_FIDELITY_MEMORY. exec-server runs the commands that fill it.
+metadata:
+  atespace: spikes
+  name: worktree-memory
+workerSelector:
+  matchLabels:
+    workload: counter
+containers:
+  - name: exec-server
+    image: localhost:5000/substrate-exec-server@sha256:27561428b8ddf6499b3d560c64d7d28f6f380ded64c4ad1cd63a25d4b187f146
+    wakeupProbe:
+      httpGet:
+        path: /readyz
+        port: 80
+    volumeMounts:
+      - name: work
+        mountPath: /work
+resources:
+  limits:
+    cpuMillicores: 1000
+    memoryBytes: 536870912
+snapshotConfig:
+  preferredFidelity: SNAPSHOT_FIDELITY_MEMORY
+  storageLocation: s3://ate-snapshots/spikes
+volumes:
+  - name: work
+    durableDir: {}

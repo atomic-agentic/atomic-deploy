@@ -1,0 +1,23 @@
+# Spike 4's follow-up: Codex rust-v0.169.0's exec-server in a gVisor actor,
+# on port 8080, reached through the router's CONNECT path. The probe on port
+# 80 answers the wake-up probe.
+metadata:
+  atespace: spikes
+  name: exec-server
+workerSelector:
+  matchLabels:
+    workload: counter
+containers:
+  - name: exec-server
+    image: localhost:5000/substrate-exec-server@sha256:27561428b8ddf6499b3d560c64d7d28f6f380ded64c4ad1cd63a25d4b187f146
+    wakeupProbe:
+      httpGet:
+        path: /readyz
+        port: 80
+resources:
+  limits:
+    cpuMillicores: 500
+    memoryBytes: 268435456
+snapshotConfig:
+  preferredFidelity: SNAPSHOT_FIDELITY_MEMORY
+  storageLocation: s3://ate-snapshots/spikes

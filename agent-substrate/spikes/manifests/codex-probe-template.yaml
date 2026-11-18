@@ -7,7 +7,7 @@ workerSelector:
     workload: counter
 containers:
   - name: probe
-    image: localhost:5000/substrate-codex-probe@sha256:69ede17e9174eded56f41c2187ea25b364862397e4e2672ba5d44884042803e4
+    image: localhost:5000/substrate-codex-probe@sha256:7f5c9596ddfa904ad028b7f33365d457a3f407fac21aec55ceb029e5de2cbbc9
     wakeupProbe:
       httpGet:
         path: /readyz

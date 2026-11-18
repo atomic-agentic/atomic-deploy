@@ -1,0 +1,32 @@
+# Spike 6: the bridge as a kagent bring-your-own harness, and an agent that
+# uses it. kagent requires the image pinned by digest.
+apiVersion: api.kagent.dev/v1alpha3
+kind: Harness
+metadata:
+  name: atomic-bridge-spike
+  namespace: kagent
+spec:
+  byo: {}
+  workload:
+    image: localhost:5000/atomic-kagent-bridge-spike@sha256:6d5edbbf810a0b5cabd1d8df38f0d52033b6fa522efe514d9cbc41edc8774cf3
+    command: ["/bridge"]
+  substrate:
+    workerPoolRef:
+      name: kagent-default
+    snapshotPolicy:
+      location: s3://ate-snapshots/kagent/
+---
+apiVersion: api.kagent.dev/v1alpha3
+kind: Agent
+metadata:
+  name: atomic-bridge-spike
+  namespace: kagent
+spec:
+  template:
+    inline:
+      description: Starts an atomic workflow run and pauses at its gates (spike 6 stub)
+      modelConfig:
+        name: default-model-config
+      systemPrompt: Unused by the bring-your-own bridge.
+  harnessRef:
+    name: atomic-bridge-spike

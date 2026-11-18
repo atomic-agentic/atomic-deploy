@@ -126,6 +126,11 @@ def codex():
     modes = {
         "workspace, network off": (":workspace", ["sandbox_workspace_write.network_access=false"]),
         "workspace, network on": (":workspace", ["sandbox_workspace_write.network_access=true"]),
+        # A custom profile: :workspace's filesystem rules with the network
+        # policy enabled, so Codex leaves bwrap's network namespace alone and
+        # Substrate's egress policy does the network isolation.
+        "workspace, network enabled by profile": (
+            "actor", ['permissions.actor.extends=":workspace"', "permissions.actor.network.enabled=true"]),
         "read-only": (":read-only", []),
         "danger-full-access": (":danger-full-access", []),
     }
