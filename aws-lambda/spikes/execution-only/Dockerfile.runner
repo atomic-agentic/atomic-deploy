@@ -1,0 +1,11 @@
+# syntax=docker/dockerfile:1@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e
+# SPDX-License-Identifier: Apache-2.0
+#
+# The runner for the execution-only spike: Lambda's Python base image, git for
+# the task, and Codex from atomic's fork, built for Amazon Linux 2023, placed
+# as `codex` in the build context. Only `codex exec-server` runs here.
+FROM public.ecr.aws/lambda/python:3.13@sha256:eac388575a9ff5c116d32b9620675341f998def5fe224fc3752186986afa9a4a
+RUN (dnf install -y git-core || microdnf install -y git-core) && (dnf clean all || microdnf clean all)
+COPY codex /opt/codex/codex
+COPY handler.py ${LAMBDA_TASK_ROOT}/
+CMD ["handler.handler"]

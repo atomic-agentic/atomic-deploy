@@ -1,0 +1,160 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# The execution-only spike: Codex runs in a stand-in control plane (an ECS
+# Fargate task) and its commands run in a Lambda function, whose exec-server
+# dials out to the control plane. Temporary; delete after use. See README.md.
+AWSTemplateFormatVersion: "2010-09-09"
+Description: atomic execution-only spike (temporary; delete after use)
+
+Parameters:
+  RunnerImage:
+    Type: String
+    Description: The runner image in ECR, by digest
+  ControlPlaneImage:
+    Type: String
+    Description: The control-plane image in ECR, by digest
+  VpcCidr:
+    Type: String
+    Default: 10.78.0.0/16
+
+Resources:
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags: [{ Key: Name, Value: atomic-spikes-exec-only }]
+  Igw:
+    Type: AWS::EC2::InternetGateway
+  IgwAttach:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties: { VpcId: !Ref Vpc, InternetGatewayId: !Ref Igw }
+  # The control plane: a public IP for image pulls and Bedrock, no inbound
+  # except the rendezvous port from the runner's security group.
+  ControlPlaneSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Select [0, !Cidr [!Ref VpcCidr, 4, 8]]
+      AvailabilityZone: !Select [0, !GetAZs ""]
+  ControlPlaneRoutes:
+    Type: AWS::EC2::RouteTable
+    Properties: { VpcId: !Ref Vpc }
+  ControlPlaneDefault:
+    Type: AWS::EC2::Route
+    DependsOn: IgwAttach
+    Properties: { RouteTableId: !Ref ControlPlaneRoutes, DestinationCidrBlock: 0.0.0.0/0, GatewayId: !Ref Igw }
+  ControlPlaneAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref ControlPlaneSubnet, RouteTableId: !Ref ControlPlaneRoutes }
+  # The runner: no route out at all. It reaches only the control plane.
+  RunnerSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Select [1, !Cidr [!Ref VpcCidr, 4, 8]]
+      AvailabilityZone: !Select [0, !GetAZs ""]
+  RunnerRoutes:
+    Type: AWS::EC2::RouteTable
+    Properties: { VpcId: !Ref Vpc }
+  RunnerAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref RunnerSubnet, RouteTableId: !Ref RunnerRoutes }
+  RunnerSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: The Lambda runner; outbound only
+      VpcId: !Ref Vpc
+      SecurityGroupEgress: [{ IpProtocol: tcp, FromPort: 8765, ToPort: 8765, CidrIp: !Ref VpcCidr }]
+  ControlPlaneSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: The control plane; the rendezvous port from the runner only
+      VpcId: !Ref Vpc
+      SecurityGroupIngress: [{ IpProtocol: tcp, FromPort: 8765, ToPort: 8765, SourceSecurityGroupId: !Ref RunnerSg }]
+      SecurityGroupEgress: [{ IpProtocol: "-1", CidrIp: 0.0.0.0/0 }]
+
+  # Control plane: may call Bedrock Mantle; the runner may call nothing.
+  ControlPlaneTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement: [{ Effect: Allow, Principal: { Service: ecs-tasks.amazonaws.com }, Action: sts:AssumeRole }]
+      Policies:
+        - PolicyName: mantle-inference-only
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: bedrock-mantle:CreateInference
+                Resource: !Sub arn:aws:bedrock-mantle:${AWS::Region}:${AWS::AccountId}:project/default
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement: [{ Effect: Allow, Principal: { Service: ecs-tasks.amazonaws.com }, Action: sts:AssumeRole }]
+      ManagedPolicyArns: [arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy]
+  RunnerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement: [{ Effect: Allow, Principal: { Service: lambda.amazonaws.com }, Action: sts:AssumeRole }]
+      ManagedPolicyArns: [arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole]
+
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties: { ClusterName: atomic-spikes-exec-only }
+  ControlPlaneLogs:
+    Type: AWS::Logs::LogGroup
+    Properties: { LogGroupName: /atomic-spikes/exec-only/control-plane, RetentionInDays: 1 }
+  ControlPlaneTask:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: atomic-spikes-exec-only-control-plane
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: "1024"
+      Memory: "2048"
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt ControlPlaneTaskRole.Arn
+      RuntimePlatform: { CpuArchitecture: X86_64, OperatingSystemFamily: LINUX }
+      ContainerDefinitions:
+        - Name: control-plane
+          Image: !Ref ControlPlaneImage
+          Essential: true
+          Environment: [{ Name: ENV_ID, Value: spike }]
+          PortMappings: [{ ContainerPort: 8765 }]
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref ControlPlaneLogs
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: cp
+
+  RunnerLogs:
+    Type: AWS::Logs::LogGroup
+    Properties: { LogGroupName: /aws/lambda/atomic-spikes-exec-runner, RetentionInDays: 1 }
+  Runner:
+    Type: AWS::Lambda::Function
+    DependsOn: RunnerLogs
+    Properties:
+      FunctionName: atomic-spikes-exec-runner
+      PackageType: Image
+      Code: { ImageUri: !Ref RunnerImage }
+      Role: !GetAtt RunnerRole.Arn
+      Timeout: 600
+      MemorySize: 2048
+      EphemeralStorage: { Size: 1024 }
+      Architectures: [x86_64]
+      VpcConfig: { SubnetIds: [!Ref RunnerSubnet], SecurityGroupIds: [!Ref RunnerSg] }
+
+Outputs:
+  Cluster: { Value: !Ref Cluster }
+  ControlPlaneTask: { Value: !Ref ControlPlaneTask }
+  ControlPlaneSubnet: { Value: !Ref ControlPlaneSubnet }
+  ControlPlaneSg: { Value: !Ref ControlPlaneSg }
+  Runner: { Value: !Ref Runner }

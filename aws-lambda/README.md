@@ -66,7 +66,8 @@ from CloudWatch.
 | Lite atoms, OpenAPI and MCP calls through the executor, gates, workflow code | The control plane | No code executes. A Lambda would only wait on the model, and credentials stay where they already are |
 | Codex atoms with declared tools and no shell | The control plane, with Codex's shell tool off | Codex's sandbox cannot start on Fargate, so the control plane never runs model-directed commands |
 | Atom code: `---ts` blocks, scripts, exec atoms, file parsers | `code` runner on Lambda, one invocation per execution | Untrusted code on untrusted input gets a microVM, sees only its declared inputs, and returns its outputs |
-| Codex atoms that need a shell, and stdio MCP servers | `agent` runner on Lambda, one invocation per attempt (harness mode), with atomic's Codex fork (gap 20) | The whole turn runs inside the microVM; its model and tool calls go back to the control plane, which holds the credentials. Upstream Codex 0.169 cannot start a command in Lambda, because Lambda refuses the `prctl` call Codex makes before each one; the fork makes that call best effort |
+| Codex atoms that need a shell | Codex in the control plane; its commands in an `exec` runner on Lambda, one invocation per step, whose exec-server dials out to the control plane (execution-only placement, gap 21) | Codex's thread, its state and every credential stay in the control plane, as atomic's plan places them; the runner holds nothing but the step's workspace (spike 11). Needs atomic's Codex fork, since upstream Codex cannot start a command in Lambda (gap 20) |
+| stdio MCP servers, and atoms where a round trip per command is too slow | `agent` runner on Lambda, one invocation per attempt (harness mode), with atomic's Codex fork | The whole turn runs inside the microVM, so a stdio MCP server never starts in the credential-holding control plane; its model and tool calls go back to the control plane (spike 10) |
 
 Codex's sandbox cannot start on either platform; the [spikes](spikes/README.md)
 ran Codex's own `bwrap` on both. Fargate refuses user namespaces. Lambda
@@ -123,14 +124,15 @@ flowchart LR
 | --- | --- | --- |
 | Control plane | ECS Fargate service, control-plane image by digest | One task until atomic's multi-worker fencing (M19) is in place, then two or more. Bedrock through the task role, so no model key exists anywhere; other secrets from Secrets Manager |
 | Console | ECS Fargate service, console image by digest | Two or more tasks; it holds no state. Signs people in with OIDC (M27), forwards each person's token to `atomic serve`, relays server-sent events and the thread bridge, and queries CloudWatch for its telemetry screens. No database access and no approving credential of its own |
-| Amazon Bedrock | Codex's Bedrock provider and atomic's lite atoms, signed with the task role | Models per tier as model or inference-profile IDs; the only model endpoint the deployment uses (see decision 8) |
+| Amazon Bedrock | Codex's Bedrock provider and atomic's lite atoms, signed with the task role | Models per tier as model or inference-profile IDs; the only model endpoint the deployment uses (see decision 9) |
 | Public ALB | HTTPS with an ACM certificate | One host for the console; routes on another host for the HTTP API, webhooks, Slack and Teams interactivity, MCP and A2A streams, and WebSocket remote attach |
 | Internal ALB | Two listeners with separate security groups | The **API listener**, reachable only from the console: the HTTP API, the event stream and the thread bridge. The **gateway listener**, reachable only from runner subnets: model calls, tool calls that need secrets, artifact grants, heartbeats and attempt completion, each with the attempt's token and epoch. A runner can never reach the API listener |
 | `code` runner | Lambda, container image, in runner subnets | Deno and the toolchains atom code declares (M52). Synchronous invoke: inputs and outputs as artifacts, one execution per invocation |
+| `exec` runner | Lambda, container image, in runner subnets | `codex exec-server` in its `direct` remote mode, dialling out to the control plane's registry listener for one step; the function's role only writes logs. Synchronous or asynchronous invoke for the step's length |
 | `agent` runner | Lambda, container image, in runner subnets | `atomic runner` in harness mode with Codex. Asynchronous invoke; completion reported to the gateway |
 | RDS for PostgreSQL | Multi-AZ, KMS-encrypted, point-in-time recovery | durare, the gate store, the work graph, the effect ledger. Only the control plane connects |
 | S3 | Versioned, KMS-encrypted | The artifact store (M35): files in and out of atom code, large results, Codex transcripts from runners |
-| Telemetry | atomic's in-process exporter in every process, Codex's signals included | Content filtered before export, signed with SigV4 by the task or function role, sent straight to CloudWatch's OTLP endpoints. No sidecar, extension or collector service (decision 7) |
+| Telemetry | atomic's in-process exporter in every process, Codex's signals included | Content filtered before export, signed with SigV4 by the task or function role, sent straight to CloudWatch's OTLP endpoints. No sidecar, extension or collector service (decision 8) |
 | CloudWatch | OpenTelemetry metrics (queried with PromQL), Transaction Search for spans, CloudWatch Logs, Application Signals | The backend for everything, and the source of the console's telemetry screens. Amazon Managed Grafana is optional, for operators who want the repository's dashboards |
 | VPC | Three subnet tiers in two or three Availability Zones | Control plane and console (a Bedrock endpoint, NAT for Slack, APIs and the OIDC provider), runners (no route out; endpoints for S3, Lambda and CloudWatch only), database |
 
@@ -210,34 +212,43 @@ console's own credentials cannot approve a gate.
    long-lived process by design, and Fargate runs it as designed. Remote
    attach, `LISTEN/NOTIFY`, in-process timers and in-memory Codex threads all
    work. The cost is a small always-on task, and the deployment has to respect
-   that two tasks can briefly overlap during a rollout (decision 6).
-2. **Atoms are placed by what they do, not all on Lambda.** A lite atom on
+   that two tasks can briefly overlap during a rollout (decision 7).
+2. **Codex stays in the control plane; its commands go to Lambda.** Codex's
+   exec-server has a remote mode in which it registers with a registry and
+   dials out to it, so a Lambda function, which accepts no connections, can
+   still be Codex's environment. Spike 11 ran a real Codex turn this way: the
+   function held no credential and no route to anything but the control plane,
+   and each command cost milliseconds more than local. This is atomic's
+   default placement, so harness mode is kept for what needs it: stdio MCP
+   servers, and atoms with so many commands that a round trip each matters.
+   Lite atoms, as before, need no runner at all.
+3. **Atoms are placed by what they do, not all on Lambda.** A lite atom on
    Lambda would cost a cold start and a gateway round trip to make one model
    call that the control plane makes anyway. Lambda is for code: that is where
    a microVM per execution protects something.
-3. **Credentials never enter a runner.** Runners reach only the gateway
+4. **Credentials never enter a runner.** Runners reach only the gateway
    listener and S3, and S3 only through presigned URLs for the objects of their
    own execution. In the `agent` runner, Codex's provider base URL points at a
    loopback shim in `atomic runner` that forwards to the gateway. Each runner's
    role may do nothing but export its telemetry; its role credentials are in
    its environment like any Lambda's, so that is all model-directed code can do
    with them.
-4. **No model-directed commands in the control plane.** Codex's sandbox
+5. **No model-directed commands in the control plane.** Codex's sandbox
    cannot start on Fargate. Rather than run commands unsandboxed beside the
    database credentials, every atom that needs a shell or runs code is placed
    on a runner, and `atomic check` refuses a placement that would break this.
-5. **RDS for PostgreSQL, connected directly.** A long-lived control plane
+6. **RDS for PostgreSQL, connected directly.** A long-lived control plane
    holds a small pool, so RDS Proxy is optional (faster failover), not needed
    for connection storms. The password comes from Secrets Manager with
    rotation.
-6. **One control-plane task until fencing lands.** ECS replaces tasks by
+7. **One control-plane task until fencing lands.** ECS replaces tasks by
    starting the new one before stopping the old, which briefly runs two
    owners. Until M19's ownership epochs are in place, the service deploys
    with a minimum healthy percent of 0 and a maximum of 100: stop, then start,
    with durare recovering unfinished runs. That trades a short outage per
    deploy for correctness. The console has no such constraint and rolls
    normally.
-7. **Every process exports straight to CloudWatch.** atomic's exporter signs
+8. **Every process exports straight to CloudWatch.** atomic's exporter signs
    with SigV4 using the task or function role and applies the content filter
    before anything leaves the process: the text of prompts, model replies and
    tool calls (email bodies, API responses, customer data) never reaches
@@ -257,7 +268,7 @@ console's own credentials cannot approve a gate.
    per step, keeping every span costs little. A collector gateway can still be
    added for tail sampling or an independent content backstop, without
    changing atomic.
-8. **Every model call goes to Amazon Bedrock, signed with the control plane's
+9. **Every model call goes to Amazon Bedrock, signed with the control plane's
    task role.** At atomic's pinned Codex revision, Codex's Bedrock provider
    falls back to the AWS SDK's default credential chain and signs with SigV4,
    so the task role is the whole of the model credential. It speaks to two
@@ -318,7 +329,7 @@ console's own credentials cannot approve a gate.
    - **Cost by project.** Application inference profiles, tagged per project
      or team, give Bedrock's bill the same breakdown as atomic's cost
      attribution (M34).
-9. **The console is its own service, acting for people, never for itself.**
+10. **The console is its own service, acting for people, never for itself.**
    It scales and deploys apart from the control plane, and keeps the public
    browser surface off `atomic serve`. The browser talks only to the console
    (one origin, an HttpOnly session cookie); the console talks to
@@ -328,7 +339,7 @@ console's own credentials cannot approve a gate.
    never decide, so a compromised console cannot approve a gate as anyone.
    It holds no database credential: everything comes through the API, as the
    console plan requires ("reads come from the run record").
-10. **The console draws telemetry from CloudWatch, not a link out.** The
+11. **The console draws telemetry from CloudWatch, not a link out.** The
     console plan links out to the trace backend in the team profile. With
     CloudWatch as the only backend, the console can instead query it read-only
     with its task role: spans from Transaction Search and logs from
@@ -351,7 +362,7 @@ repository).
 | Network | VPC, three subnet tiers, NAT gateways for the control-plane tier only, VPC endpoints (S3 gateway; Bedrock Runtime, Lambda, Secrets Manager, KMS, ECR, STS, and CloudWatch Logs, metrics and X-Ray for telemetry from runner subnets), security groups: the console reaches only the API listener and CloudWatch; runners reach only the gateway listener and the endpoints; only the control plane reaches RDS |
 | Data | `AWS::RDS::DBInstance` (Multi-AZ, `ManageMasterUserPassword`), parameter and subnet groups, a KMS key; optional `AWS::RDS::DBProxy` |
 | Storage | S3 bucket with versioning, lifecycle rules per prefix, and a policy limited to the control plane's role |
-| Control plane | ECS cluster, task definition (image digest, CPU and memory, secrets, log configuration, health check), service (deployment percentages from decision 6), the internal ALB with its two listeners, target groups on atomic's readiness endpoint |
+| Control plane | ECS cluster, task definition (image digest, CPU and memory, secrets, log configuration, health check), service (deployment percentages from decision 7), the internal ALB with its two listeners, target groups on atomic's readiness endpoint |
 | Console | Task definition and service in the same cluster (image digest, OIDC client secret from Secrets Manager, a rolling deployment), a host rule on the public ALB, the ACM certificate |
 | Runners | `AWS::Lambda::Function` (`PackageType: Image`) for `code` and `agent`, each with reserved concurrency as its share of `max_concurrent_atoms`, VPC configuration in runner subnets, and for `agent` an event invoke config with no retries and an on-failure destination |
 | Observability | `AWS::XRay::TransactionSearchConfig` (with its indexing share; the per-run queries do not need indexing) and the CloudWatch Logs resource policy that lets X-Ray write `aws/spans`, log groups with retention, Application Signals, alarms; optionally an Amazon Managed Grafana workspace with a SigV4 Prometheus data source. No collector resources |
@@ -379,7 +390,7 @@ to. **Blocking** means the deployment cannot work without it.
 | 1 | **Blocking.** Placement by what an atom does | The control plane has no sandbox, so atoms that run code or need a shell must go elsewhere, and nothing may silently fall back to running them in-process | Each backend states at connect whether it sandboxes commands, its maximum execution time and whether it keeps a workspace; atomic places each atom on a backend that satisfies it, and `atomic check` reports the placement and refuses an impossible one | M23 (`atomic-3bj`), M24 |
 | 2 | **Blocking.** A request/response backend for atom code | The `ExecutionBackend` plans for sessions (exec-server, pods, actors); a Lambda invocation is one call with no inbound connection | A `code` execution contract: code hash, declared inputs as artifact references, declared environment and network, deadline in; outputs, digests, exit class and logs out. Fits M17's Deno process and M52's exec atoms, which atomic runs, not Codex | M17, M52, M24 |
 | 3 | **Blocking.** Health and readiness | ECS and the ALBs need endpoints to decide when a task takes traffic and when to replace it | Liveness, readiness (database reachable, migrations current, recovery done) and graceful shutdown on SIGTERM within the stop timeout | `atomic-exnm` |
-| 4 | **Blocking.** Stable executor identity on a platform that renames tasks | durare recovers only runs owned by its executor ID, and every ECS deployment starts a task with a new ID | Recovery by lease and epoch, with executor identity a telemetry label; until then, a fixed executor ID per service, safe only with one task (decision 6) | `atomic-ctd6.1`, M19 |
+| 4 | **Blocking.** Stable executor identity on a platform that renames tasks | durare recovers only runs owned by its executor ID, and every ECS deployment starts a task with a new ID | Recovery by lease and epoch, with executor identity a telemetry label; until then, a fixed executor ID per service, safe only with one task (decision 7) | `atomic-ctd6.1`, M19 |
 | 5 | Harness-mode runner contract without A2A | Harness mode is planned through kagent's A2A contract (M26), which assumes a listening server | A request/response attempt contract for `agent` runners: pinned definition hashes, inputs, epoch, deadline and token in; candidate, usage and transcript reference out; the exit classes of `atomic-xaay` as error types | M24 (`atomic-xaay`), M26 |
 | 6 | The runner gateway and loopback shim | Runner model and tool calls must reach the control plane, which holds every credential | A gateway listener in `atomic serve`, separate from its API (model calls with M56's per-request check, tool calls through the executor, artifact grants, heartbeats, completion), and a loopback endpoint in `atomic runner` that Codex's provider base URL and tool configuration point at | M56, M15, M21 |
 | 7 | Running Codex with its sandbox off, by policy | bubblewrap is not expected to start in Lambda | A mode selected by managed requirements, never by an atom, that disables Codex's sandbox because the backend reports an outer boundary; network declarations enforced by the backend instead | `atomic-hfve.1` |
@@ -395,7 +406,8 @@ to. **Blocking** means the deployment cannot work without it.
 | 17 | SigV4-signed OTLP export, with an in-process content filter | CloudWatch's OTLP endpoints take only SigV4 for traces, and no collector runs to filter content | **Assumed delivered** (see the status note) | M44 (`atomic-xt2b.5` to `.8`), `atomic-jalw.1` |
 | 18 | **Blocking.** The console as a separate service | The console plan embeds the console in `atomic serve`: static assets, an in-process thread bridge, one origin | `atomic serve`'s API, event stream and thread bridge usable by a console in another process, on an internal listener; the person's OIDC token accepted on every call, so authorization and the audit record are the person's; the console's service identity limited to reads; the console plan's security rules (no state change without a human session, `Origin` and `Host` checks, untrusted text escaped) kept across the hop | M49 (`atomic-mvy3`), console plan (`atomic-lone`, `atomic-ro1a`), M27 |
 | 19 | The console's telemetry screens from CloudWatch | The console plan links out to the trace backend in the team profile; here CloudWatch is the only backend and the console draws from it | A read-only CloudWatch adapter for the trace, metric and log screens: spans and logs through Logs Insights by `atomic.workflow.id` and trace ID (about a second per run in the spikes, with no span indexing), metrics with PromQL (about 100 ms), keeping CloudWatch's dotted attribute names and `@resource.` prefixes; no storage, no query engine. It changes the console plan's team-profile position, so it needs a decision there first | Console plan (Telemetry: local viewer, team link-out), M44, M49 |
-| 20 | Codex commands without `prctl` or a pseudo-terminal | Lambda's seccomp policy refuses every `prctl` and provides no pseudo-terminals. Upstream Codex 0.169 calls `prctl(PR_SET_PDEATHSIG)` before every command and fails if it cannot, so in a Lambda function its model loop runs but no command starts, in any sandbox mode (spike 10) | **Done in atomic's fork:** [atomic-agentic/codex](https://github.com/atomic-agentic/codex) branch `atomic`, commit `a4b0cac`, makes the signal best effort; with it, commands run in Lambda (spike 10). Codex's configuration sets `[features] unified_exec_tty = false` so commands always use pipes. Still to do: track the fork in `deps/forks.toml`, rebase it in the Codex bump procedure, offer it upstream with the telemetry changes (`atomic-xt2b.8`), and make atomic's own process launches (the `code` runner's Deno, scripts) tolerate a refused `prctl` the same way | M24, M52, `atomic-xt2b.5` |
+| 20 | Codex commands without `prctl` or a pseudo-terminal | Lambda's seccomp policy refuses every `prctl` and provides no pseudo-terminals. Upstream Codex 0.169 calls `prctl(PR_SET_PDEATHSIG)` before every command and fails if it cannot, so in a Lambda function its model loop runs but no command starts, in any sandbox mode (spike 10) | **Done in atomic's fork:** [atomic-agentic/codex](https://github.com/atomic-agentic/codex) branch `atomic`, makes the signal best effort (`a4b0cac`, which spike 10 ran) and skips the parent-PID check when no signal was armed (`f8e52f3`, after openai/codex#40454); with it, commands run in Lambda (spike 10). Codex's configuration sets `[features] unified_exec_tty = false` so commands always use pipes. Still to do: track the fork in `deps/forks.toml`, rebase it in the Codex bump procedure, offer it upstream with the telemetry changes (`atomic-xt2b.8`), and make atomic's own process launches (the `code` runner's Deno, scripts) tolerate a refused `prctl` the same way | M24, M52, `atomic-xt2b.5` |
+| 21 | **Blocking** for execution-only placement. A registry and rendezvous for Codex's exec-server | A Lambda function accepts no connections, so Codex's exec-server must dial out: in its `direct` remote mode it registers at `POST /cloud/environment/{id}/direct/register` and opens a WebSocket to the URL returned, carrying plain JSON-RPC (spike 11) | In `atomic serve`, on the runner gateway listener with TLS: the registration endpoint, keyed by attempt (environment ID = attempt), checking the SigV4 signature against the runner function's role and the attempt's token; the WebSocket the exec-server dials, piped to Codex's environment for that step; one session per step, refused after the step's deadline; the runner's invocation ending when the session ends. A remote environment per step in Codex's `environments.toml`, or through Codex's environment registry API if it can be pointed at `atomic serve` | `atomic-2h8u`, `atomic-7jyf`, M20 |
 
 Gaps 1 to 4 are the ones to design before 1.0 freezes: they change the
 `ExecutionBackend` statement at connect, add a second kind of backend, and fix
@@ -435,12 +447,13 @@ the probes and the full results.
 
 | Spike | Result | What changed here |
 | --- | --- | --- |
-| Codex's sandbox on Lambda and Fargate | Cannot start on either. Fargate does have Landlock (ABI 2), and a process confined its own writes with it, with no namespaces | Confirms decision 4. Landlock is an option for atom code atomic runs itself, not for Codex's shell |
+| Codex's sandbox on Lambda and Fargate | Cannot start on either. Fargate does have Landlock (ABI 2), and a process confined its own writes with it, with no namespaces | Confirms decision 5. Landlock is an option for atom code atomic runs itself, not for Codex's shell |
 | Environment reuse on Lambda | `/tmp`, background processes and environment changes survive warm invocations; `/tmp` survives a runtime crash | Gap 8: the runner cleans `/tmp` itself; exiting is not enough |
-| Bedrock from a private subnet | Mantle and Runtime both work through PrivateLink. Runtime can be limited to one model by IAM; Mantle cannot. OpenAI frontier models need per-account access. `gpt-oss-120b` serves the Responses API with tools and streaming on Mantle's `/v1` route; Qwen and Gemma answer chat completions with strict JSON schemas on Runtime | Decision 8: Runtime for an IAM-enforced allowlist, Mantle `/v1` with gpt-oss-120b for testing Codex atoms now; gap 15: lite atoms speak chat completions, or a `submit` tool |
-| CloudWatch from runner subnets | OTLP logs, metrics and traces all accepted through VPC endpoints, 20 to 60 ms per warm request; traces only with Transaction Search on | Decision 7: the template enables Transaction Search |
+| Bedrock from a private subnet | Mantle and Runtime both work through PrivateLink. Runtime can be limited to one model by IAM; Mantle cannot. OpenAI frontier models need per-account access. `gpt-oss-120b` serves the Responses API with tools and streaming on Mantle's `/v1` route; Qwen and Gemma answer chat completions with strict JSON schemas on Runtime | Decision 9: Runtime for an IAM-enforced allowlist, Mantle `/v1` with gpt-oss-120b for testing Codex atoms now; gap 15: lite atoms speak chat completions, or a `submit` tool |
+| CloudWatch from runner subnets | OTLP logs, metrics and traces all accepted through VPC endpoints, 20 to 60 ms per warm request; traces only with Transaction Search on | Decision 8: the template enables Transaction Search |
 | The console's queries | A run's spans and logs by `atomic.workflow.id` in about a second through Logs Insights, with no span indexing; metrics by PromQL in about 100 ms | Gap 19 is feasible as designed |
 | Codex in a Lambda function | Its model loop runs, through a loopback shim to Mantle, with the shim's rewrite working; init 0.6 s, but the first `codex exec` in a new environment 31 to 40 s against 2 to 14 s warm. Upstream Codex cannot start any command, because Lambda refuses `prctl`; with atomic's fork, commands run | Gap 20, closed by the fork; the `agent` runner stays on Lambda |
+| Execution-only placement on Lambda | Codex in a Fargate task, commands in a Lambda function whose exec-server dialled out through a loopback relay to a stand-in registry and rendezvous: a real Codex turn (fix a failing test) in 5 to 8 s, commands and file writes in the function at 2 to 13 ms a request, the function holding no credential | Decision 2 and gap 21: execution-only is the default for Codex atoms that need a shell |
 
 Still to run, since they need atomic itself or OpenAI model access on Bedrock:
 

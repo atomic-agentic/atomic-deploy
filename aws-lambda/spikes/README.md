@@ -12,6 +12,8 @@ Run on 2026-11-17 in `us-west-2`.
 | [`run.sh`](run.sh) | Runs every probe and prints the raw results as JSON lines |
 | [`landlock_probe.py`](landlock_probe.py) | A follow-up for Fargate, passed to the task as its `PROBE` |
 | [`agent-runner/`](agent-runner) | Spike 10: Codex in a Lambda function with a loopback shim, its image and stack |
+| [`execution-only/`](execution-only) | Spike 11: Codex in the control plane and its commands in a Lambda function whose exec-server dials out; results in its README |
+| [`upstream-issues.md`](upstream-issues.md) | Issue drafts for Codex and an AWS support case, from these spikes; not filed |
 
 ```sh
 aws cloudformation deploy --stack-name atomic-spikes \
@@ -215,7 +217,7 @@ after a change to Codex: a best-effort parent-death signal, and commands over
 pipes rather than a pseudo-terminal.
 
 **With atomic's Codex fork.** [atomic-agentic/codex](https://github.com/atomic-agentic/codex),
-branch `atomic`, is `rust-v0.169.0` plus one commit (`a4b0cac`):
+branch `atomic`, is `rust-v0.169.0` plus `a4b0cac`, the commit this run used:
 `set_parent_death_signal` now carries on without the signal when `prctl`
 fails with `EPERM`, `EACCES` or `ENOSYS`, as `detach_from_tty` already does
 when `setsid` is refused, with Linux unit tests. Built for Amazon Linux 2023
@@ -230,6 +232,11 @@ when `setsid` is refused, with Linux unit tests. Built for Amazon Linux 2023
 | Tool turn with Codex's default terminal setting | Succeeded, 1.9 s: the model did not ask for a terminal, so Codex used pipes. Setting `unified_exec_tty = false` keeps it that way when a model does ask |
 
 So the `agent` runner on Lambda needs the fork's commit and one setting.
+
+The fork has since gained `f8e52f3`, after openai/codex#40454: when no
+signal could be armed, it also skips the parent-PID check that follows,
+and counts `EINVAL` as unavailable. It was not run in Lambda again; there
+it only means returning before a check that already passed.
 
 Workarounds looked for, and why none applies:
 
