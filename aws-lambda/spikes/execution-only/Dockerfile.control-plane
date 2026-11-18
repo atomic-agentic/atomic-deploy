@@ -1,0 +1,11 @@
+# syntax=docker/dockerfile:1@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e
+# SPDX-License-Identifier: Apache-2.0
+#
+# The stand-in control plane for the execution-only spike: the rendezvous, the
+# Mantle shim and Codex (atomic's fork, placed as `codex` in the build context,
+# with shim.py copied from ../agent-runner).
+FROM public.ecr.aws/docker/library/python:3.13-slim@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90
+RUN pip install --no-cache-dir --root-user-action=ignore aiohttp botocore
+COPY codex /usr/local/bin/codex
+COPY rendezvous.py shim.py shim_main.py control-plane.sh /app/
+ENTRYPOINT ["sh", "/app/control-plane.sh"]

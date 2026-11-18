@@ -12,6 +12,7 @@ Run on 2026-11-17 in `us-west-2`.
 | [`run.sh`](run.sh) | Runs every probe and prints the raw results as JSON lines |
 | [`landlock_probe.py`](landlock_probe.py) | A follow-up for Fargate, passed to the task as its `PROBE` |
 | [`agent-runner/`](agent-runner) | Spike 10: Codex in a Lambda function with a loopback shim, its image and stack |
+| [`execution-only/`](execution-only) | Spike 11: Codex in the control plane and its commands in a Lambda function whose exec-server dials out; results in its README |
 | [`upstream-issues.md`](upstream-issues.md) | Issue drafts for Codex and an AWS support case, from these spikes; not filed |
 
 ```sh
